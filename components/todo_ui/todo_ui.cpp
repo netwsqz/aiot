@@ -11,10 +11,6 @@ static lv_obj_t *s_tasks_page = NULL;
 static char s_current_list_id[8] = {0};
 static todo_page_type_t s_current_page = TODO_PAGE_LISTS;
 
-// Swipe-to-go-back state
-static lv_coord_t swipe_start_x = 0;
-static bool swiping = false;
-
 // Back callback
 static void (*s_back_cb)(void) = NULL;
 
