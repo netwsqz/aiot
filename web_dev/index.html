@@ -12,6 +12,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .tab { padding: 8px 16px; border-radius: 20px; border: 1px solid #ddd; background: white; cursor: pointer; white-space: nowrap; }
 .tab.active { background: #2196F3; color: white; border-color: #2196F3; }
 .tab-add { background: #4CAF50; color: white; border-color: #4CAF50; }
+.add-list-btn { display: block; width: calc(100% - 16px); margin: 8px; padding: 12px; background: #4CAF50; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }
 .task-list { padding: 8px; }
 .task { background: white; border-radius: 8px; padding: 12px; margin-bottom: 8px; display: flex; align-items: center; gap: 12px; }
 .task.done { opacity: 0.6; }
@@ -37,6 +38,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 </head>
 <body>
 <div class="header">AIoT 任务管理</div>
+<button class="add-list-btn" id="addListBtn">+ 新建清单</button>
 <div class="tabs" id="tabs"></div>
 <div class="task-list" id="taskList"></div>
 <button class="add-btn" id="addTaskBtn">+ 添加任务</button>
@@ -100,7 +102,7 @@ function renderTabs() {
   const tabs = document.getElementById('tabs');
   tabs.innerHTML = lists.map(l =>
     `<div class="tab ${l.id === currentListId ? 'active' : ''}" onclick="switchList('${l.id}')">${l.name}</div>`
-  ).join('') + '<div class="tab tab-add" onclick="openListModal()">+</div>';
+  ).join('');
 }
 
 function renderTasks(tasks) {
@@ -180,6 +182,7 @@ async function submitList() {
 }
 
 document.getElementById('addTaskBtn').onclick = openModal;
+document.getElementById('addListBtn').onclick = openListModal;
 document.getElementById('delListBtn').onclick = async () => {
   if (!currentListId) return;
   if (!confirm('删除此清单及所有任务？')) return;
