@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIoT 任务管理</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; }
+.header { background: #2196F3; color: white; padding: 16px; text-align: center; font-size: 18px; }
+.tabs { display: flex; overflow-x: auto; padding: 8px; gap: 8px; background: white; }
+.tab { padding: 8px 16px; border-radius: 20px; border: 1px solid #ddd; background: white; cursor: pointer; white-space: nowrap; }
+.tab.active { background: #2196F3; color: white; border-color: #2196F3; }
+.tab-add { background: #4CAF50; color: white; border-color: #4CAF50; }
+.task-list { padding: 8px; }
+.task { background: white; border-radius: 8px; padding: 12px; margin-bottom: 8px; display: flex; align-items: center; gap: 12px; }
+.task.done { opacity: 0.6; }
+.task-checkbox { width: 24px; height: 24px; cursor: pointer; }
+.task-content { flex: 1; }
+.task-text { font-size: 16px; }
+.task-text.done { text-decoration: line-through; color: #999; }
+.task-meta { font-size: 12px; color: #666; margin-top: 4px; }
+.task-delete { color: #f44336; cursor: pointer; font-size: 20px; }
+.add-btn { display: block; width: calc(100% - 16px); margin: 8px; padding: 12px; background: #4CAF50; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }
+.danger-btn { display: block; width: calc(100% - 16px); margin: 8px; padding: 12px; background: #f44336; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }
+.modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 100; align-items: center; justify-content: center; }
+.modal.active { display: flex; }
+.modal-content { background: white; border-radius: 12px; padding: 20px; width: 90%; max-width: 400px; }
+.modal-title { font-size: 18px; margin-bottom: 16px; }
+.modal-input { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 12px; font-size: 16px; }
+.modal-select { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 12px; font-size: 16px; }
+.modal-btns { display: flex; gap: 8px; justify-content: flex-end; }
+.modal-btn { padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer; font-size: 14px; }
+.btn-cancel { background: #ddd; }
+.btn-ok { background: #2196F3; color: white; }
+</style>
+</head>
+<body>
+<div class="header">AIoT 任务管理</div>
+<div class="tabs" id="tabs"></div>
+<div class="task-list" id="taskList"></div>
+<button class="add-btn" id="addTaskBtn">+ 添加任务</button>
+<button class="danger-btn" id="delListBtn">删除清单</button>
+
+<div class="modal" id="taskModal">
+<div class="modal-content">
+  <div class="modal-title">新建任务</div>
+  <input class="modal-input" id="taskText" placeholder="任务内容">
+  <select class="modal-select" id="taskPriority">
+    <option value="0">普通</option>
+    <option value="1">重要</option>
+    <option value="2">紧急</option>
+  </select>
+  <input class="modal-input" id="taskDue" type="date">
+  <div class="modal-btns">
+    <button class="modal-btn btn-cancel" onclick="closeModal()">取消</button>
+    <button class="modal-btn btn-ok" onclick="submitTask()">确定</button>
+  </div>
+</div>
+</div>
+
+<div class="modal" id="listModal">
+<div class="modal-content">
+  <div class="modal-title">新建清单</div>
+  <input class="modal-input" id="listName" placeholder="清单名称">
+  <div class="modal-btns">
+    <button class="modal-btn btn-cancel" onclick="closeListModal()">取消</button>
+    <button class="modal-btn btn-ok" onclick="submitList()">确定</button>
+  </div>
+</div>
+</div>
+
+<script>
+const API = '';
+let lists = [];
+let currentListId = null;
+
+async function loadLists() {
+  const res = await fetch(API + '/api/lists');
+  const data = await res.json();
+  if (data.ok) {
+    lists = data.data;
+    if (!currentListId && lists.length > 0) currentListId = lists[0].id;
+    renderTabs();
+    loadTasks();
+  }
+}
+
+async function loadTasks() {
+  if (!currentListId) {
+    document.getElementById('taskList').innerHTML = '<p style="padding:16px;color:#999">暂无清单，请先创建</p>';
+    return;
+  }
+  const res = await fetch(API + '/api/lists/' + currentListId + '/tasks');
+  const data = await res.json();
+  if (data.ok) renderTasks(data.data);
+}
+
+function renderTabs() {
+  const tabs = document.getElementById('tabs');
+  tabs.innerHTML = lists.map(l =>
+    `<div class="tab ${l.id === currentListId ? 'active' : ''}" onclick="switchList('${l.id}')">${l.name}</div>`
+  ).join('') + '<div class="tab tab-add" onclick="openListModal()">+</div>';
+}
+
+function renderTasks(tasks) {
+  const list = document.getElementById('taskList');
+  if (tasks.length === 0) {
+    list.innerHTML = '<p style="padding:16px;color:#999">暂无任务</p>';
+    return;
+  }
+  list.innerHTML = tasks.map(t => {
+    const pri = ['', '🟡重要', '🔴紧急'][t.priority] || '';
+    const due = t.due ? `📅 ${t.due}` : '';
+    return `<div class="task ${t.done ? 'done' : ''}">
+      <input type="checkbox" class="task-checkbox" ${t.done ? 'checked' : ''} onchange="toggleTask('${t.id}', this.checked)">
+      <div class="task-content">
+        <div class="task-text ${t.done ? 'done' : ''}">${t.text}</div>
+        <div class="task-meta">${pri} ${due}</div>
+      </div>
+      <span class="task-delete" onclick="deleteTask('${t.id}')">×</span>
+    </div>`;
+  }).join('');
+}
+
+function switchList(id) {
+  currentListId = id;
+  loadLists();
+}
+
+async function toggleTask(id, done) {
+  await fetch(API + '/api/tasks/' + id, {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({done})
+  });
+  loadTasks();
+}
+
+async function deleteTask(id) {
+  if (!confirm('删除此任务？')) return;
+  await fetch(API + '/api/tasks/' + id, {method: 'DELETE'});
+  loadTasks();
+}
+
+function openModal() { document.getElementById('taskModal').classList.add('active'); }
+function closeModal() { document.getElementById('taskModal').classList.remove('active'); }
+function openListModal() { document.getElementById('listModal').classList.add('active'); }
+function closeListModal() { document.getElementById('listModal').classList.remove('active'); }
+
+async function submitTask() {
+  if (!currentListId) return alert('请先创建一个清单');
+  const text = document.getElementById('taskText').value.trim();
+  if (!text) return alert('请输入任务内容');
+  const priority = parseInt(document.getElementById('taskPriority').value);
+  const due = document.getElementById('taskDue').value;
+  await fetch(API + '/api/lists/' + currentListId + '/tasks', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({text, priority, due: due || ''})
+  });
+  closeModal();
+  document.getElementById('taskText').value = '';
+  loadTasks();
+}
+
+async function submitList() {
+  const name = document.getElementById('listName').value.trim();
+  if (!name) return alert('请输入清单名称');
+  const res = await fetch(API + '/api/lists', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({name, icon: '[]'})
+  });
+  const data = await res.json();
+  closeListModal();
+  document.getElementById('listName').value = '';
+  // Auto-select newly created list
+  if (data.ok && data.data) {
+    currentListId = data.data.id;
+  }
+  loadLists();
+}
+
+document.getElementById('addTaskBtn').onclick = openModal;
+document.getElementById('delListBtn').onclick = async () => {
+  if (!currentListId) return;
+  if (!confirm('删除此清单及所有任务？')) return;
+  await fetch(API + '/api/lists/' + currentListId, {method: 'DELETE'});
+  currentListId = null;
+  loadLists();
+};
+
+loadLists();
+</script>
+</body>
+</html>

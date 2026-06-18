@@ -1,0 +1,15 @@
+menu "WiFi Configuration"
+
+    config WIFI_SSID
+        string "WiFi SSID"
+        default "your_ssid"
+        help
+            Default WiFi SSID. Can be overridden via NVS at runtime.
+
+    config WIFI_PASSWORD
+        string "WiFi Password"
+        default "your_password"
+        help
+            Default WiFi password. Can be overridden via NVS at runtime.
+
+endmenu
