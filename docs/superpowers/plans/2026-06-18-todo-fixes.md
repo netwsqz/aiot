@@ -310,16 +310,14 @@ Expected: 按钮始终可见，新建清单功能正常。
 - Consumes: lvgl (字体结构体 lv_font_t)
 - Produces: extern const lv_font_t lv_font_chinese_14 (供 ui_screen.c / todo_ui.cpp 使用)
 
-**前置说明（字体生成，离线完成）：**
-字体文件 lv_font_chinese_14.c 由 LVGL 在线字体转换器生成，不在本任务代码内手写。生成参数：
-- 字体源：思源黑体 SC Regular (SourceHanSansSC-Regular.otf)
+**前置说明（字体生成，本地完成）：**
+字体文件 lv_font_chinese_14.c 用 lv_font_conv 本地生成。生成参数：
+- 字体源：C:/Windows/Fonts/simhei.ttf（系统自带 SimHei 黑体）
 - 字号：14px
 - bpp：4
 - 字符范围：0x20-0x7E (ASCII) + GB2312 一级字库 3755 字 + 中文标点补充
 - 输出名：lv_font_chinese_14
-- 生成产物约 280 KB，直接放入 components/font_cn/
-
-若执行者无法访问在线工具，此 Step 由人工完成后再继续；本任务其余 Step 假设 .c 文件已就位。
+- 生成产物约 200-300 KB，落盘到 components/font_cn/lv_font_chinese_14.c
 
 - [ ] **Step 1: 创建 font_cn 组件目录与头文件**
 

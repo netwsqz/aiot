@@ -1,5 +1,6 @@
 #include "todo_ui.h"
 #include "todo_manager.h"
+#include "font_cn.h"
 #include <cstring>
 #include <cstdio>
 #include <lvgl.h>
@@ -53,7 +54,7 @@ static lv_obj_t *create_back_btn(lv_obj_t *parent)
     lv_obj_t *lbl = lv_label_create(btn);
     lv_label_set_text(lbl, LV_SYMBOL_LEFT);
     lv_obj_set_style_text_color(lbl, lv_color_black(), 0);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_chinese_14, 0);
     lv_obj_center(lbl);
 
     return btn;
@@ -89,7 +90,7 @@ static void create_lists_page(lv_obj_t *parent)
     s_list_title = lv_label_create(s_lists_page);
     lv_obj_set_pos(s_list_title, 34, 4);
     lv_label_set_text(s_list_title, "My Lists");
-    lv_obj_set_style_text_font(s_list_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_list_title, &lv_font_chinese_14, 0);
     lv_obj_set_style_text_decor(s_list_title, LV_TEXT_DECOR_UNDERLINE, 0);
 
     s_list_container = lv_obj_create(s_lists_page);
@@ -121,7 +122,7 @@ static void create_tasks_page(lv_obj_t *parent)
     s_task_title = lv_label_create(s_tasks_page);
     lv_obj_set_pos(s_task_title, 34, 4);
     lv_label_set_text(s_task_title, "Tasks");
-    lv_obj_set_style_text_font(s_task_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_task_title, &lv_font_chinese_14, 0);
 
     s_task_container = lv_obj_create(s_tasks_page);
     lv_obj_set_size(s_task_container, 196, 170);
@@ -162,7 +163,7 @@ static void refresh_lists_page(void)
         lv_obj_t *lbl = lv_label_create(s_list_container);
         lv_label_set_text(lbl, "No lists yet");
         lv_obj_set_style_text_color(lbl, lv_color_hex(0x999999), 0);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_chinese_14, 0);
         return;
     }
 
@@ -180,7 +181,7 @@ static void refresh_lists_page(void)
         lv_obj_t *lbl = lv_label_create(btn);
         lv_label_set_text(lbl, buf);
         lv_obj_set_style_text_color(lbl, lv_color_black(), 0);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_chinese_14, 0);
         lv_obj_center(lbl);
     }
 }
@@ -213,7 +214,7 @@ static void refresh_tasks_page(void)
         lv_obj_t *lbl = lv_label_create(s_task_container);
         lv_label_set_text(lbl, "No tasks");
         lv_obj_set_style_text_color(lbl, lv_color_hex(0x999999), 0);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_chinese_14, 0);
         return;
     }
 

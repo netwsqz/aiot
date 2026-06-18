@@ -1,6 +1,7 @@
 #include "ui.h"
 #include "lvgl_port.h"  /* EPD_WIDTH, EPD_HEIGHT */
 #include "todo_ui.h"
+#include "font_cn.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -42,7 +43,7 @@ static void setup_top_left(lv_ui *ui)
     lv_obj_set_pos(ui->lbl_date, 0, 65);
     lv_obj_set_size(ui->lbl_date, 100, 20);
     lv_label_set_text(ui->lbl_date, "June 15, Sun");
-    lv_obj_set_style_text_font(ui->lbl_date, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ui->lbl_date, &lv_font_chinese_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_date, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_align(ui->lbl_date, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 }
@@ -71,7 +72,7 @@ static void setup_top_right(lv_ui *ui)
     lv_obj_set_pos(ui->lbl_humidity, 0, 58);
     lv_obj_set_size(ui->lbl_humidity, 100, 18);
     lv_label_set_text(ui->lbl_humidity, "62%");
-    lv_obj_set_style_text_font(ui->lbl_humidity, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ui->lbl_humidity, &lv_font_chinese_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_humidity, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_align(ui->lbl_humidity, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
@@ -79,13 +80,13 @@ static void setup_top_right(lv_ui *ui)
     ui->lbl_wifi = lv_label_create(ui->cont_top_right);
     lv_obj_set_pos(ui->lbl_wifi, 4, 82);
     lv_label_set_text(ui->lbl_wifi, LV_SYMBOL_WIFI);
-    lv_obj_set_style_text_font(ui->lbl_wifi, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ui->lbl_wifi, &lv_font_chinese_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_wifi, lv_color_black(), LV_PART_MAIN);
 
     ui->lbl_battery = lv_label_create(ui->cont_top_right);
     lv_obj_set_pos(ui->lbl_battery, 70, 82);
     lv_label_set_text(ui->lbl_battery, LV_SYMBOL_BATTERY_FULL);
-    lv_obj_set_style_text_font(ui->lbl_battery, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ui->lbl_battery, &lv_font_chinese_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_battery, lv_color_black(), LV_PART_MAIN);
 }
 
@@ -108,7 +109,7 @@ static void setup_bottom_left(lv_ui *ui)
     ui->lbl_todo_title = lv_label_create(ui->cont_bottom_left);
     lv_obj_set_pos(ui->lbl_todo_title, 4, 4);
     lv_label_set_text(ui->lbl_todo_title, "Todo");
-    lv_obj_set_style_text_font(ui->lbl_todo_title, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ui->lbl_todo_title, &lv_font_chinese_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_todo_title, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_decor(ui->lbl_todo_title, LV_TEXT_DECOR_UNDERLINE, LV_PART_MAIN);
 
@@ -119,7 +120,7 @@ static void setup_bottom_left(lv_ui *ui)
         lv_obj_t *lbl = lv_label_create(ui->cont_bottom_left);
         lv_obj_set_pos(lbl, 4, 24 + i * 22);
         lv_label_set_text(lbl, todos[i]);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_font(lbl, &lv_font_chinese_14, LV_PART_MAIN);
         lv_obj_set_style_text_color(lbl, lv_color_black(), LV_PART_MAIN);
         *todo_handles[i] = lbl;
     }
