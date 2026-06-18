@@ -395,6 +395,7 @@ esp_err_t TodoWeb_Start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 4;
     config.stack_size = 8192;
+    config.uri_match_fn = httpd_uri_match_wildcard;
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
