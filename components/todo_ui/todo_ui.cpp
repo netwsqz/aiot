@@ -42,8 +42,8 @@ static void back_btn_cb(lv_event_t *e)
 static lv_obj_t *create_back_btn(lv_obj_t *parent)
 {
     lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_set_size(btn, 28, 20);
-    lv_obj_set_pos(btn, 2, 2);
+    lv_obj_set_size(btn, 40, 32);
+    lv_obj_set_pos(btn, 4, 4);
     lv_obj_set_style_bg_color(btn, lv_color_white(), 0);
     lv_obj_set_style_border_width(btn, 0, 0);
     lv_obj_set_style_shadow_width(btn, 0, 0);
@@ -99,6 +99,10 @@ static void create_lists_page(lv_obj_t *parent)
     lv_obj_set_style_border_width(s_list_container, 0, 0);
     lv_obj_set_style_pad_all(s_list_container, 2, 0);
     lv_obj_set_flex_flow(s_list_container, LV_FLEX_FLOW_COLUMN);
+
+    /* Let swipe gestures bubble up to the screen handler */
+    lv_obj_add_flag(s_lists_page, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_flag(s_list_container, LV_OBJ_FLAG_GESTURE_BUBBLE);
 }
 
 static void create_tasks_page(lv_obj_t *parent)
@@ -126,6 +130,10 @@ static void create_tasks_page(lv_obj_t *parent)
     lv_obj_set_style_border_width(s_task_container, 0, 0);
     lv_obj_set_style_pad_all(s_task_container, 2, 0);
     lv_obj_set_flex_flow(s_task_container, LV_FLEX_FLOW_COLUMN);
+
+    /* Let swipe gestures bubble up to the screen handler */
+    lv_obj_add_flag(s_tasks_page, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_flag(s_task_container, LV_OBJ_FLAG_GESTURE_BUBBLE);
 }
 
 static void list_click_cb(lv_event_t *e)
