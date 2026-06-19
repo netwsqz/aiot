@@ -34,6 +34,12 @@ typedef struct {
     /* Bottom-right: image placeholder */
     lv_obj_t *cont_bottom_right;
     lv_obj_t *lbl_image_placeholder;
+
+    /* Bottom-right: pomodoro mini display (shown when a pomodoro is running) */
+    lv_obj_t *cont_timer_mini;
+    lv_obj_t *lbl_timer_mini_title;
+    lv_obj_t *lbl_timer_mini_min;
+    lv_obj_t *bar_timer_mini;
 } lv_ui;
 
 /** Create the full four-quadrant UI.  Must be called under LVGL lock. */
@@ -46,12 +52,16 @@ void ui_update_humidity(int rh_pct);
 void ui_update_battery(uint8_t level);
 void ui_update_wifi_status(bool connected);
 void ui_update_todo_summary(void);
+void ui_update_timer_mini(bool running, uint32_t remaining_sec, uint32_t total_sec);
 
 /* ── Page management ── */
 typedef enum {
     PAGE_DASHBOARD,
     PAGE_TODO_LISTS,
     PAGE_TODO_TASKS,
+    PAGE_TIMER_TOOLS,
+    PAGE_POMODORO,
+    PAGE_REMINDER,
 } ui_page_t;
 
 void ui_switch_page(ui_page_t page);

@@ -20,6 +20,7 @@
 #include "todo_web.h"
 #include "todo_ui.h"
 #include "timer_engine.h"
+#include "timer_ui.h"
 
 #include <ctime>
 
@@ -33,6 +34,12 @@ static epaper_driver_display *epd = nullptr;
  * which already runs inside Lvgl_Lock. Re-acquiring the (non-recursive) mutex
  * here deadlocks and silently drops the navigation — do NOT lock. */
 static void todo_back_cb(void)
+{
+    ui_switch_page(PAGE_DASHBOARD);
+}
+
+/* Timer tools back callback: tools page → dashboard. Runs inside LVGL lock. */
+static void timer_back_cb(void)
 {
     ui_switch_page(PAGE_DASHBOARD);
 }
@@ -250,6 +257,14 @@ extern "C" void app_main(void)
     /* 16. Timer engine */
     TimerEngine_Init();
     ESP_LOGI(TAG, "Timer engine init done");
+
+    /* 17. Timer UI */
+    if (Lvgl_Lock(-1)) {
+        TimerUi_Init();
+        TimerUi_SetBackCallback(timer_back_cb);
+        Lvgl_Unlock();
+    }
+    ESP_LOGI(TAG, "Timer UI init done");
 
     /* 15. BOOT key detection task */
     xTaskCreatePinnedToCore(boot_key_task, "boot_key", 4 * 1024, nullptr, 5, nullptr, 1);

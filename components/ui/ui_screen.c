@@ -3,6 +3,9 @@
 #include "todo_ui.h"
 #include "todo_manager.h"
 #include "font_cn.h"
+#include "timer_ui.h"
+#include "timer_engine.h"
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -10,6 +13,7 @@ static lv_ui ui;
 static ui_page_t s_current_page = PAGE_DASHBOARD;
 static lv_obj_t *s_dashboard_screen = NULL;
 static lv_obj_t *s_todo_screen = NULL;
+static lv_obj_t *s_timer_screen = NULL;
 
 /* ── Helper: clean container (no border, no scroll, transparent) ── */
 static lv_obj_t *create_quadrant(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
@@ -25,6 +29,13 @@ static lv_obj_t *create_quadrant(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
     lv_obj_set_style_pad_all(cont, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_row(cont, 0, LV_PART_MAIN);
     return cont;
+}
+
+/* ── Top-left click → enter timer tools ── */
+static void timer_entry_click_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_switch_page(PAGE_TIMER_TOOLS);
 }
 
 /* ── Top-left: Time + Date ─────────────────────────── */
@@ -47,6 +58,10 @@ static void setup_top_left(lv_ui *ui)
     lv_obj_set_style_text_font(ui->lbl_date, &lv_font_chinese_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_date, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_align(ui->lbl_date, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+
+    /* Whole top-left quadrant is the entry to timer tools */
+    lv_obj_add_flag(ui->cont_top_left, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(ui->cont_top_left, timer_entry_click_cb, LV_EVENT_CLICKED, NULL);
 }
 
 /* ── Top-right: Weather + Temp/Humidity + Status ───── */
@@ -142,6 +157,45 @@ static void setup_bottom_right(lv_ui *ui)
     lv_obj_set_style_text_font(ui->lbl_image_placeholder, &lv_font_montserrat_20, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_image_placeholder, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_align(ui->lbl_image_placeholder, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+
+    /* Pomodoro mini display — hidden until a pomodoro runs (Task 6 drives it) */
+    ui->cont_timer_mini = lv_obj_create(ui->cont_bottom_right);
+    lv_obj_set_size(ui->cont_timer_mini, 100, 100);
+    lv_obj_set_pos(ui->cont_timer_mini, 0, 0);
+    lv_obj_set_style_bg_opa(ui->cont_timer_mini, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ui->cont_timer_mini, 0, 0);
+    lv_obj_set_style_pad_all(ui->cont_timer_mini, 0, 0);
+    lv_obj_set_style_radius(ui->cont_timer_mini, 0, 0);
+    lv_obj_set_scrollbar_mode(ui->cont_timer_mini, LV_SCROLLBAR_MODE_OFF);
+
+    ui->lbl_timer_mini_title = lv_label_create(ui->cont_timer_mini);
+    lv_obj_set_pos(ui->lbl_timer_mini_title, 0, 8);
+    lv_obj_set_size(ui->lbl_timer_mini_title, 100, 16);
+    lv_label_set_text(ui->lbl_timer_mini_title, "番茄");
+    lv_obj_set_style_text_font(ui->lbl_timer_mini_title, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(ui->lbl_timer_mini_title, lv_color_black(), 0);
+    lv_obj_set_style_text_align(ui->lbl_timer_mini_title, LV_TEXT_ALIGN_CENTER, 0);
+
+    ui->lbl_timer_mini_min = lv_label_create(ui->cont_timer_mini);
+    lv_obj_set_pos(ui->lbl_timer_mini_min, 0, 28);
+    lv_obj_set_size(ui->lbl_timer_mini_min, 100, 24);
+    lv_label_set_text(ui->lbl_timer_mini_min, "");
+    lv_obj_set_style_text_font(ui->lbl_timer_mini_min, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(ui->lbl_timer_mini_min, lv_color_black(), 0);
+    lv_obj_set_style_text_align(ui->lbl_timer_mini_min, LV_TEXT_ALIGN_CENTER, 0);
+
+    ui->bar_timer_mini = lv_bar_create(ui->cont_timer_mini);
+    lv_obj_set_size(ui->bar_timer_mini, 80, 8);
+    lv_obj_set_pos(ui->bar_timer_mini, 10, 64);
+    lv_bar_set_range(ui->bar_timer_mini, 0, 100);
+    lv_obj_set_style_bg_color(ui->bar_timer_mini, lv_color_white(), 0);
+    lv_obj_set_style_border_width(ui->bar_timer_mini, 1, 0);
+    lv_obj_set_style_border_color(ui->bar_timer_mini, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(ui->bar_timer_mini, lv_color_black(), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(ui->bar_timer_mini, 0, 0);
+    lv_obj_set_style_radius(ui->bar_timer_mini, 0, LV_PART_INDICATOR);
+
+    lv_obj_add_flag(ui->cont_timer_mini, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* ── Public API ────────────────────────────────────── */
@@ -212,6 +266,43 @@ void ui_update_wifi_status(bool connected)
         lv_label_set_text(ui.lbl_wifi, "");
 }
 
+/* ── Dashboard right-bottom pomodoro mini display ── */
+void ui_update_timer_mini(bool running, uint32_t remaining_sec, uint32_t total_sec)
+{
+    static bool     last_running = false;
+    static uint32_t last_min     = 0;
+    static int      last_pct     = -1;
+
+    if (running != last_running) {
+        if (running) {
+            lv_obj_clear_flag(ui.cont_timer_mini, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(ui.lbl_image_placeholder, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(ui.cont_timer_mini, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(ui.lbl_image_placeholder, LV_OBJ_FLAG_HIDDEN);
+        }
+        last_running = running;
+        last_min = 0;
+        last_pct = -1;
+    }
+
+    if (!running) return;
+
+    uint32_t min = (remaining_sec + 59) / 60;
+    int pct = (total_sec > 0) ? (int)(100 * (total_sec - remaining_sec) / total_sec) : 0;
+
+    if (min != last_min) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%" PRIu32, min);
+        lv_label_set_text(ui.lbl_timer_mini_min, buf);
+        last_min = min;
+    }
+    if (pct != last_pct) {
+        lv_bar_set_value(ui.bar_timer_mini, pct, LV_ANIM_OFF);
+        last_pct = pct;
+    }
+}
+
 /* ── Dashboard Todo summary: top 3 by priority across all lists ───── */
 void ui_update_todo_summary(void)
 {
@@ -276,6 +367,15 @@ void ui_switch_page(ui_page_t page)
         }
         if (s_todo_screen) {
             lv_screen_load(s_todo_screen);
+        }
+    } else if (page == PAGE_TIMER_TOOLS || page == PAGE_POMODORO || page == PAGE_REMINDER) {
+        if (!s_timer_screen) s_timer_screen = TimerUi_GetScreen();
+        if (s_timer_screen) {
+            timer_page_t tp = (page == PAGE_POMODORO) ? TIMER_PAGE_POMODORO :
+                              (page == PAGE_REMINDER)  ? TIMER_PAGE_REMINDER :
+                                                        TIMER_PAGE_TOOLS;
+            TimerUi_ShowPage(tp);
+            lv_screen_load(s_timer_screen);
         }
     }
 }
