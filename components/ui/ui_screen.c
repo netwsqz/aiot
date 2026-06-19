@@ -1,6 +1,7 @@
 #include "ui.h"
 #include "lvgl_port.h"  /* EPD_WIDTH, EPD_HEIGHT */
 #include "todo_ui.h"
+#include "todo_manager.h"
 #include "font_cn.h"
 #include <stdio.h>
 #include <string.h>
@@ -76,17 +77,19 @@ static void setup_top_right(lv_ui *ui)
     lv_obj_set_style_text_color(ui->lbl_humidity, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_align(ui->lbl_humidity, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
-    /* WiFi + Battery at bottom */
+    /* WiFi + Battery at bottom.
+     * These are FontAwesome glyphs — chinese_14 has no symbol range, so
+     * use Montserrat 14 which bundles the symbol set. */
     ui->lbl_wifi = lv_label_create(ui->cont_top_right);
     lv_obj_set_pos(ui->lbl_wifi, 4, 82);
     lv_label_set_text(ui->lbl_wifi, LV_SYMBOL_WIFI);
-    lv_obj_set_style_text_font(ui->lbl_wifi, &lv_font_chinese_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ui->lbl_wifi, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_wifi, lv_color_black(), LV_PART_MAIN);
 
     ui->lbl_battery = lv_label_create(ui->cont_top_right);
     lv_obj_set_pos(ui->lbl_battery, 70, 82);
     lv_label_set_text(ui->lbl_battery, LV_SYMBOL_BATTERY_FULL);
-    lv_obj_set_style_text_font(ui->lbl_battery, &lv_font_chinese_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ui->lbl_battery, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_battery, lv_color_black(), LV_PART_MAIN);
 }
 
@@ -113,13 +116,14 @@ static void setup_bottom_left(lv_ui *ui)
     lv_obj_set_style_text_color(ui->lbl_todo_title, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_decor(ui->lbl_todo_title, LV_TEXT_DECOR_UNDERLINE, LV_PART_MAIN);
 
-    static const char *todos[] = { "1. Groceries", "2. Read", "3. Exercise" };
     lv_obj_t **todo_handles[] = { &ui->lbl_todo_1, &ui->lbl_todo_2, &ui->lbl_todo_3 };
 
     for (int i = 0; i < 3; i++) {
         lv_obj_t *lbl = lv_label_create(ui->cont_bottom_left);
         lv_obj_set_pos(lbl, 4, 24 + i * 22);
-        lv_label_set_text(lbl, todos[i]);
+        lv_obj_set_size(lbl, 92, 20);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_label_set_text(lbl, "");
         lv_obj_set_style_text_font(lbl, &lv_font_chinese_14, LV_PART_MAIN);
         lv_obj_set_style_text_color(lbl, lv_color_black(), LV_PART_MAIN);
         *todo_handles[i] = lbl;
@@ -206,6 +210,50 @@ void ui_update_wifi_status(bool connected)
         lv_label_set_text(ui.lbl_wifi, LV_SYMBOL_WIFI);
     else
         lv_label_set_text(ui.lbl_wifi, "");
+}
+
+/* ── Dashboard Todo summary: top 3 by priority across all lists ───── */
+void ui_update_todo_summary(void)
+{
+    lv_obj_t *slots[3] = { ui.lbl_todo_1, ui.lbl_todo_2, ui.lbl_todo_3 };
+
+    /* Use static storage — these arrays are ~1.6KB and would otherwise
+     * land on the caller's stack. data_task and app_main both have tight
+     * stacks, so keep it off the stack. */
+    static todo_list_t lists[TODO_MAX_LISTS];
+    static todo_task_t tasks[TODO_MAX_TASKS];
+    static todo_task_t top[3];
+
+    uint8_t list_count = 0;
+    if (TodoMgr_GetLists(lists, &list_count) != ESP_OK) list_count = 0;
+
+    int top_n = 0;
+    for (int i = 0; i < list_count; i++) {
+        uint16_t tcount = 0;
+        if (TodoMgr_GetTasks(lists[i].id, tasks, &tcount) != ESP_OK) continue;
+        for (int j = 0; j < tcount; j++) {
+            if (tasks[j].done) continue;
+            int pos = top_n;
+            while (pos > 0 && top[pos - 1].priority < tasks[j].priority) pos--;
+            if (pos >= 3) continue;
+            int end = (top_n < 3) ? top_n : 2;
+            for (int k = end; k > pos; k--) top[k] = top[k - 1];
+            top[pos] = tasks[j];
+            if (top_n < 3) top_n++;
+        }
+    }
+
+    for (int i = 0; i < 3; i++) {
+        if (i < top_n) {
+            const char *mark = (top[i].priority == 2) ? "!! " :
+                               (top[i].priority == 1) ? "! " : "";
+            char buf[80];
+            snprintf(buf, sizeof(buf), "%d.%s%s", i + 1, mark, top[i].text);
+            lv_label_set_text(slots[i], buf);
+        } else {
+            lv_label_set_text(slots[i], "");
+        }
+    }
 }
 
 /* ── Page management ── */

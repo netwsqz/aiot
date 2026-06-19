@@ -11,6 +11,13 @@ static lv_obj_t *s_tasks_page = NULL;
 static char s_current_list_id[8] = {0};
 static todo_page_type_t s_current_page = TODO_PAGE_LISTS;
 
+/* Stable storage for IDs passed as user_data to LVGL callbacks.
+ * Stack-allocated `lists[]` / `tasks[]` arrays in refresh_*() go away
+ * the moment the function returns, so we MUST copy IDs into persistent
+ * memory before handing pointers to LVGL events. */
+static char s_list_id_pool[TODO_MAX_LISTS][TODO_ID_LEN];
+static char s_task_id_pool[TODO_MAX_TASKS][TODO_ID_LEN];
+
 // Back callback
 static void (*s_back_cb)(void) = NULL;
 
@@ -50,7 +57,9 @@ static lv_obj_t *create_back_btn(lv_obj_t *parent)
     lv_obj_t *lbl = lv_label_create(btn);
     lv_label_set_text(lbl, LV_SYMBOL_LEFT);
     lv_obj_set_style_text_color(lbl, lv_color_black(), 0);
-    lv_obj_set_style_text_font(lbl, &lv_font_chinese_14, 0);
+    /* LV_SYMBOL_LEFT is a FontAwesome glyph (U+F053) — chinese_14 has no
+     * symbol range, so use Montserrat 14 which bundles the symbols. */
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
     lv_obj_center(lbl);
 
     return btn;
@@ -84,14 +93,14 @@ static void create_lists_page(lv_obj_t *parent)
     create_back_btn(s_lists_page);
 
     s_list_title = lv_label_create(s_lists_page);
-    lv_obj_set_pos(s_list_title, 34, 4);
+    lv_obj_set_pos(s_list_title, 48, 10);
     lv_label_set_text(s_list_title, "My Lists");
     lv_obj_set_style_text_font(s_list_title, &lv_font_chinese_14, 0);
     lv_obj_set_style_text_decor(s_list_title, LV_TEXT_DECOR_UNDERLINE, 0);
 
     s_list_container = lv_obj_create(s_lists_page);
-    lv_obj_set_size(s_list_container, 196, 170);
-    lv_obj_set_pos(s_list_container, 2, 26);
+    lv_obj_set_size(s_list_container, 196, 160);
+    lv_obj_set_pos(s_list_container, 2, 34);
     lv_obj_set_style_bg_opa(s_list_container, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_list_container, 0, 0);
     lv_obj_set_style_pad_all(s_list_container, 2, 0);
@@ -116,13 +125,13 @@ static void create_tasks_page(lv_obj_t *parent)
     create_back_btn(s_tasks_page);
 
     s_task_title = lv_label_create(s_tasks_page);
-    lv_obj_set_pos(s_task_title, 34, 4);
+    lv_obj_set_pos(s_task_title, 48, 10);
     lv_label_set_text(s_task_title, "Tasks");
     lv_obj_set_style_text_font(s_task_title, &lv_font_chinese_14, 0);
 
     s_task_container = lv_obj_create(s_tasks_page);
-    lv_obj_set_size(s_task_container, 196, 170);
-    lv_obj_set_pos(s_task_container, 2, 26);
+    lv_obj_set_size(s_task_container, 196, 160);
+    lv_obj_set_pos(s_task_container, 2, 34);
     lv_obj_set_style_bg_opa(s_task_container, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_task_container, 0, 0);
     lv_obj_set_style_pad_all(s_task_container, 2, 0);
@@ -168,11 +177,17 @@ static void refresh_lists_page(void)
         snprintf(buf, sizeof(buf), "%s %s  (%d)",
                  lists[i].icon, lists[i].name, lists[i].task_count);
 
+        /* Copy ID into stable static pool — stack `lists[]` dies on return */
+        if (i < TODO_MAX_LISTS) {
+            strncpy(s_list_id_pool[i], lists[i].id, TODO_ID_LEN - 1);
+            s_list_id_pool[i][TODO_ID_LEN - 1] = '\0';
+        }
+
         lv_obj_t *btn = lv_btn_create(s_list_container);
         lv_obj_set_size(btn, 190, 28);
         lv_obj_set_style_bg_color(btn, lv_color_white(), 0);
         lv_obj_set_style_border_width(btn, 1, 0);
-        lv_obj_add_event_cb(btn, list_click_cb, LV_EVENT_CLICKED, (void *)lists[i].id);
+        lv_obj_add_event_cb(btn, list_click_cb, LV_EVENT_CLICKED, (void *)s_list_id_pool[i]);
 
         lv_obj_t *lbl = lv_label_create(btn);
         lv_label_set_text(lbl, buf);
@@ -227,13 +242,21 @@ static void refresh_tasks_page(void)
                  tasks[i].due[0] ? " " : "",
                  tasks[i].due);
         lv_checkbox_set_text(cb, label);
+        /* Checkbox text defaults to Montserrat (no CJK) — use the
+         * chinese font so task text in 中文 displays correctly. */
+        lv_obj_set_style_text_font(cb, &lv_font_chinese_14, LV_PART_MAIN);
 
         if (tasks[i].done) {
             lv_obj_add_state(cb, LV_STATE_CHECKED);
             lv_obj_set_style_text_color(cb, lv_color_hex(0x999999), 0);
         }
 
-        lv_obj_add_event_cb(cb, task_check_cb, LV_EVENT_VALUE_CHANGED, (void *)tasks[i].id);
+        /* Copy ID into stable static pool — stack `tasks[]` dies on return */
+        if (i < TODO_MAX_TASKS) {
+            strncpy(s_task_id_pool[i], tasks[i].id, TODO_ID_LEN - 1);
+            s_task_id_pool[i][TODO_ID_LEN - 1] = '\0';
+        }
+        lv_obj_add_event_cb(cb, task_check_cb, LV_EVENT_VALUE_CHANGED, (void *)s_task_id_pool[i]);
     }
 }
 

@@ -45,6 +45,7 @@ void ui_update_temperature(int temp_c);
 void ui_update_humidity(int rh_pct);
 void ui_update_battery(uint8_t level);
 void ui_update_wifi_status(bool connected);
+void ui_update_todo_summary(void);
 
 /* ── Page management ── */
 typedef enum {

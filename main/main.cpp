@@ -27,13 +27,13 @@ static const char *TAG = "main";
 /* EPD driver instance */
 static epaper_driver_display *epd = nullptr;
 
-/* Back callback: TODO lists page → dashboard */
+/* Back callback: TODO lists page → dashboard.
+ * ALWAYS invoked from an LVGL event callback (back_btn_cb / swipe_gesture_cb),
+ * which already runs inside Lvgl_Lock. Re-acquiring the (non-recursive) mutex
+ * here deadlocks and silently drops the navigation — do NOT lock. */
 static void todo_back_cb(void)
 {
-    if (Lvgl_Lock(500)) {
-        ui_switch_page(PAGE_DASHBOARD);
-        Lvgl_Unlock();
-    }
+    ui_switch_page(PAGE_DASHBOARD);
 }
 
 /* BOOT key long-press detection */
@@ -119,6 +119,7 @@ static void data_task(void *arg)
         if (tick % 30 == 0) {
             if (Lvgl_Lock(500)) {
                 TodoUi_Refresh();
+                ui_update_todo_summary();
                 Lvgl_Unlock();
             }
         }
@@ -236,6 +237,9 @@ extern "C" void app_main(void)
         Lvgl_Unlock();
     }
     ESP_LOGI(TAG, "TODO UI init done");
+    /* Note: ui_update_todo_summary() lives on data_task's larger stack
+     * (~3.7KB of locals) — calling it from app_main here would overflow
+     * the main task stack and corrupt FreeRTOS internals. */
 
     /* 14. WiFi AP + Web Server */
     WifiAp_Init();
