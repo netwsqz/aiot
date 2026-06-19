@@ -43,9 +43,10 @@ static lv_obj_t     *s_alert_dur_lbl      = NULL;
 static lv_obj_t     *s_alert_time_lbl     = NULL;
 static lv_obj_t     *s_screen_before_alert = NULL;
 static bool          s_alert_showing      = false;
+static bool          s_alert_chain_active = false;
 static timer_kind_t  s_last_fired_kind    = TIMER_KIND_POMODORO;
 
-static const uint32_t POMO_PRESETS[3] __attribute__((unused)) = {15, 25, 50};
+static const uint32_t POMO_PRESETS[3] = {15, 25, 50};
 static const uint32_t REM_PRESETS[6]   = {5, 10, 15, 30, 45, 60};
 
 /* forward decl: refresh_pomodoro_page is defined later but called from pomo_start/cancel_cb */
@@ -443,6 +444,7 @@ static void alert_click_cb(lv_event_t *e)
 {
     (void)e;
     s_alert_showing = false;
+    bool more_pending = s_fired_queue && (uxQueueMessagesWaiting(s_fired_queue) > 0);
     if (s_last_fired_kind == TIMER_KIND_POMODORO) {
         /* 番茄钟到点 → 回番茄钟页（已变未运行） */
         TimerUi_ShowPage(TIMER_PAGE_POMODORO);
@@ -450,6 +452,9 @@ static void alert_click_cb(lv_event_t *e)
     } else {
         /* 提醒到点 → 回到弹提醒前的屏幕 */
         lv_screen_load(s_screen_before_alert);
+    }
+    if (!more_pending) {
+        s_alert_chain_active = false;
     }
     /* 下一秒 TickUpdate 会自动弹队列里下一个 */
 }
@@ -528,7 +533,10 @@ static void show_alert(const fired_item_t *item)
 {
     s_alert_showing = true;
     s_last_fired_kind = item->kind;
-    s_screen_before_alert = lv_screen_active();
+    if (!s_alert_chain_active) {
+        s_screen_before_alert = lv_screen_active();
+    }
+    s_alert_chain_active = true;
     if (!s_alert_screen) build_alert_screen();
     fill_alert_content(item);
     lv_screen_load(s_alert_screen);
@@ -544,7 +552,7 @@ static void refresh_visible_page(void)
 /* ============ 公开 API ============ */
 esp_err_t TimerUi_Init(void)
 {
-    s_fired_queue = xQueueCreate(4, sizeof(fired_item_t));
+    s_fired_queue = xQueueCreate(8, sizeof(fired_item_t));
     if (!s_fired_queue) return ESP_FAIL;
 
     s_timer_screen = lv_obj_create(NULL);
@@ -591,9 +599,14 @@ void TimerUi_SetBackCallback(void (*cb)(void)) { s_back_cb = cb; }
 
 void TimerUi_PushFiredEvent(uint8_t id, timer_kind_t kind, uint32_t total_seconds)
 {
-    if (!s_fired_queue) return;
+    if (!s_fired_queue) {
+        ESP_LOGE(TAG, "fired queue NULL — event lost");
+        return;
+    }
     fired_item_t item = { id, kind, total_seconds };
-    xQueueSend(s_fired_queue, &item, 0);
+    if (xQueueSend(s_fired_queue, &item, 0) != pdTRUE) {
+        ESP_LOGE(TAG, "fired queue full — event lost (kind=%d)", item.kind);
+    }
 }
 
 void TimerUi_TickUpdate(void)

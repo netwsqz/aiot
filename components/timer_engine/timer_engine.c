@@ -15,7 +15,7 @@ static const char *TAG = "timer_eng";
 static timer_instance_t s_slots[TIMER_MAX_SLOTS];
 static SemaphoreHandle_t s_mutex = NULL;
 static TimerHandle_t     s_tick_timer = NULL;
-static timer_fired_cb_t  s_fired_cb = NULL;
+static volatile timer_fired_cb_t  s_fired_cb = NULL;
 static uint8_t           s_next_id = 1;
 
 /* tick 回调里收集到点的计时器，释放锁后再触发回调 */
@@ -54,7 +54,11 @@ esp_err_t TimerEngine_Init(void)
 
     s_tick_timer = xTimerCreate("timer_tick", pdMS_TO_TICKS(TICK_PERIOD_MS),
                                 pdTRUE, NULL, tick_cb);
-    if (!s_tick_timer) return ESP_FAIL;
+    if (!s_tick_timer) {
+        vSemaphoreDelete(s_mutex);
+        s_mutex = NULL;
+        return ESP_FAIL;
+    }
     xTimerStart(s_tick_timer, 0);
 
     ESP_LOGI(TAG, "Init done, tick 1s");
