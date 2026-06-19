@@ -150,9 +150,14 @@ static void data_task(void *arg)
 
         /* Touch — every 200 ms */
         if (tick % 1 == 0) {
-            /* Timer UI: poll fired queue + per-minute refresh (every 1 s) */
+            /* Timer UI: poll fired queue + per-minute refresh + mini display (every 1 s) */
             if (Lvgl_Lock(500)) {
                 TimerUi_TickUpdate();
+                const timer_instance_t *pomo = TimerEngine_GetPomodoro();
+                if (pomo)
+                    ui_update_timer_mini(true, pomo->remaining_sec, pomo->total_seconds);
+                else
+                    ui_update_timer_mini(false, 0, 0);
                 Lvgl_Unlock();
             }
 
