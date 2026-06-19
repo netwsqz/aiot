@@ -48,6 +48,9 @@ static timer_kind_t  s_last_fired_kind    = TIMER_KIND_POMODORO;
 static const uint32_t POMO_PRESETS[3] __attribute__((unused)) = {15, 25, 50};
 static const uint32_t REM_PRESETS[6] __attribute__((unused))  = {5, 10, 15, 30, 45, 60};
 
+/* forward decl: refresh_pomodoro_page is defined later but called from pomo_start/cancel_cb */
+static void refresh_pomodoro_page(void);
+
 /* ============ 通用：返回按钮 + 手势（仿 todo_ui） ============ */
 static void back_btn_cb(lv_event_t *e)
 {
@@ -130,15 +133,120 @@ static void create_tools_page(lv_obj_t *parent)
     }
 }
 
-/* ============ pomodoro / reminder 页（本 Task 占位，Task 3/5 实现） ============ */
+/* ============ pomodoro / reminder 页 ============ */
+static void pomo_start_cb(lv_event_t *e)
+{
+    uint32_t min = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    if (TimerEngine_StartPomodoro(min, NULL) == ESP_OK) refresh_pomodoro_page();
+}
+
+static void pomo_cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    const timer_instance_t *p = TimerEngine_GetPomodoro();
+    if (p) TimerEngine_Cancel(p->id);
+    refresh_pomodoro_page();
+}
+
 static void create_pomo_page(lv_obj_t *parent)
 {
     s_pomo_page = make_page(parent);
     create_back_btn(s_pomo_page);
-    lv_obj_t *t = lv_label_create(s_pomo_page);
-    lv_obj_set_pos(t, 48, 10);
-    lv_label_set_text(t, "番茄钟");
-    lv_obj_set_style_text_font(t, &lv_font_chinese_14, 0);
+
+    lv_obj_t *title = lv_label_create(s_pomo_page);
+    lv_obj_set_pos(title, 48, 10);
+    lv_label_set_text(title, "番茄钟");
+    lv_obj_set_style_text_font(title, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_decor(title, LV_TEXT_DECOR_UNDERLINE, 0);
+
+    /* ---- 未运行：选时长 ---- */
+    s_pomo_idle_cont = lv_obj_create(s_pomo_page);
+    lv_obj_set_size(s_pomo_idle_cont, 200, 160);
+    lv_obj_set_pos(s_pomo_idle_cont, 0, 40);
+    lv_obj_set_style_bg_opa(s_pomo_idle_cont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_pomo_idle_cont, 0, 0);
+    lv_obj_set_style_pad_all(s_pomo_idle_cont, 0, 0);
+
+    lv_obj_t *hint = lv_label_create(s_pomo_idle_cont);
+    lv_obj_set_pos(hint, 0, 10);
+    lv_obj_set_size(hint, 200, 16);
+    lv_label_set_text(hint, "选择时长");
+    lv_obj_set_style_text_font(hint, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *btn = lv_btn_create(s_pomo_idle_cont);
+        lv_obj_set_size(btn, 50, 36);
+        lv_obj_set_pos(btn, 20 + i * 55, 36);
+        lv_obj_set_style_bg_color(btn, lv_color_white(), 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_add_event_cb(btn, pomo_start_cb, LV_EVENT_CLICKED,
+                            (void *)(uintptr_t)POMO_PRESETS[i]);
+        lv_obj_t *lbl = lv_label_create(btn);
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%lu", (unsigned long)POMO_PRESETS[i]);
+        lv_label_set_text(lbl, buf);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_black(), 0);
+        lv_obj_center(lbl);
+    }
+
+    lv_obj_t *unit = lv_label_create(s_pomo_idle_cont);
+    lv_obj_set_pos(unit, 0, 80);
+    lv_obj_set_size(unit, 200, 16);
+    lv_label_set_text(unit, "分钟");
+    lv_obj_set_style_text_font(unit, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_align(unit, LV_TEXT_ALIGN_CENTER, 0);
+
+    /* ---- 运行中：倒计时 + 进度条 + 取消 ---- */
+    s_pomo_run_cont = lv_obj_create(s_pomo_page);
+    lv_obj_set_size(s_pomo_run_cont, 200, 160);
+    lv_obj_set_pos(s_pomo_run_cont, 0, 40);
+    lv_obj_set_style_bg_opa(s_pomo_run_cont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_pomo_run_cont, 0, 0);
+    lv_obj_set_style_pad_all(s_pomo_run_cont, 0, 0);
+
+    s_pomo_min_label = lv_label_create(s_pomo_run_cont);
+    lv_obj_set_pos(s_pomo_min_label, 0, 6);
+    lv_obj_set_size(s_pomo_min_label, 200, 32);
+    lv_label_set_text(s_pomo_min_label, "25");
+    lv_obj_set_style_text_font(s_pomo_min_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_pomo_min_label, lv_color_black(), 0);
+    lv_obj_set_style_text_align(s_pomo_min_label, LV_TEXT_ALIGN_CENTER, 0);
+
+    lv_obj_t *minu = lv_label_create(s_pomo_run_cont);
+    lv_obj_set_pos(minu, 0, 40);
+    lv_obj_set_size(minu, 200, 16);
+    lv_label_set_text(minu, "min");
+    lv_obj_set_style_text_font(minu, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_align(minu, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_pomo_bar = lv_bar_create(s_pomo_run_cont);
+    lv_obj_set_size(s_pomo_bar, 160, 10);
+    lv_obj_set_pos(s_pomo_bar, 20, 66);
+    lv_bar_set_range(s_pomo_bar, 0, 100);
+    lv_obj_set_style_bg_color(s_pomo_bar, lv_color_white(), 0);
+    lv_obj_set_style_border_width(s_pomo_bar, 1, 0);
+    lv_obj_set_style_border_color(s_pomo_bar, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(s_pomo_bar, lv_color_black(), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(s_pomo_bar, 0, 0);
+    lv_obj_set_style_radius(s_pomo_bar, 0, LV_PART_INDICATOR);
+
+    lv_obj_t *cancel = lv_btn_create(s_pomo_run_cont);
+    lv_obj_set_size(cancel, 100, 30);
+    lv_obj_set_pos(cancel, 50, 92);
+    lv_obj_set_style_bg_color(cancel, lv_color_white(), 0);
+    lv_obj_set_style_border_width(cancel, 1, 0);
+    lv_obj_set_style_radius(cancel, 4, 0);
+    lv_obj_add_event_cb(cancel, pomo_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *clbl = lv_label_create(cancel);
+    lv_label_set_text(clbl, "取消");
+    lv_obj_set_style_text_font(clbl, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(clbl, lv_color_black(), 0);
+    lv_obj_center(clbl);
+
+    lv_obj_add_flag(s_pomo_run_cont, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void create_rem_page(lv_obj_t *parent)
@@ -151,7 +259,22 @@ static void create_rem_page(lv_obj_t *parent)
     lv_obj_set_style_text_font(s_rem_title, &lv_font_chinese_14, 0);
 }
 
-static void refresh_pomodoro_page(void) { /* Task 3 */ }
+static void refresh_pomodoro_page(void)
+{
+    const timer_instance_t *p = TimerEngine_GetPomodoro();
+    if (p) {
+        lv_obj_add_flag(s_pomo_idle_cont, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_pomo_run_cont, LV_OBJ_FLAG_HIDDEN);
+        char buf[12];
+        snprintf(buf, sizeof(buf), "%u", (unsigned)((p->remaining_sec + 59) / 60));
+        lv_label_set_text(s_pomo_min_label, buf);
+        int pct = (int)(100 * (p->total_seconds - p->remaining_sec) / p->total_seconds);
+        lv_bar_set_value(s_pomo_bar, pct, LV_ANIM_OFF);
+    } else {
+        lv_obj_clear_flag(s_pomo_idle_cont, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_pomo_run_cont, LV_OBJ_FLAG_HIDDEN);
+    }
+}
 static void refresh_reminder_page(void) { /* Task 5 */ }
 
 /* ============ 公开 API ============ */
