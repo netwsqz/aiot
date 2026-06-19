@@ -252,8 +252,19 @@ static void create_pomo_page(lv_obj_t *parent)
 
 static void rem_start_cb(lv_event_t *e)
 {
+    /* Guard: pre-check active reminder count to make the disabled-button
+     * intent explicit. LV_STATE_DISABLED is styling only — clicks still
+     * dispatch in LVGL v9. */
+    timer_instance_t arr[TIMER_MAX_SLOTS];
+    uint8_t n = 0;
+    TimerEngine_GetAll(arr, &n);
+    uint8_t rem_n = 0;
+    for (int i = 0; i < n; i++) if (arr[i].kind == TIMER_KIND_REMINDER) rem_n++;
+    if (rem_n >= 3) return;
+
     uint32_t min = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
-    if (TimerEngine_StartReminder(min, NULL) == ESP_OK) refresh_reminder_page();
+    uint8_t new_id;
+    if (TimerEngine_StartReminder(min, &new_id) == ESP_OK) refresh_reminder_page();
 }
 
 static void confirm_yes_cb(lv_event_t *e)
