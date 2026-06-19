@@ -19,6 +19,7 @@
 #include "wifi_ap.h"
 #include "todo_web.h"
 #include "todo_ui.h"
+#include "timer_engine.h"
 
 #include <ctime>
 
@@ -245,6 +246,10 @@ extern "C" void app_main(void)
     WifiAp_Init();
     TodoWeb_Init();
     ESP_LOGI(TAG, "WiFi AP + Web Server init done");
+
+    /* 16. Timer engine */
+    TimerEngine_Init();
+    ESP_LOGI(TAG, "Timer engine init done");
 
     /* 15. BOOT key detection task */
     xTaskCreatePinnedToCore(boot_key_task, "boot_key", 4 * 1024, nullptr, 5, nullptr, 1);
