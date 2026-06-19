@@ -44,6 +44,13 @@ static void timer_back_cb(void)
     ui_switch_page(PAGE_DASHBOARD);
 }
 
+/* Timer fired: runs in FreeRTOS timer service task — MUST NOT touch LVGL.
+ * Just enqueue; data_task consumes it under the LVGL lock. */
+static void timer_fired_cb(const timer_instance_t *t)
+{
+    TimerUi_PushFiredEvent(t->id, t->kind, t->total_seconds);
+}
+
 /* BOOT key long-press detection */
 static void boot_key_task(void *arg)
 {
@@ -143,6 +150,12 @@ static void data_task(void *arg)
 
         /* Touch — every 200 ms */
         if (tick % 1 == 0) {
+            /* Timer UI: poll fired queue + per-minute refresh (every 1 s) */
+            if (Lvgl_Lock(500)) {
+                TimerUi_TickUpdate();
+                Lvgl_Unlock();
+            }
+
             uint16_t tx, ty;
             if (PortTouch_GetPoint(&tx, &ty)) {
                 ESP_LOGI(TAG, "Touch: (%d, %d)", tx, ty);
@@ -265,6 +278,9 @@ extern "C" void app_main(void)
         Lvgl_Unlock();
     }
     ESP_LOGI(TAG, "Timer UI init done");
+
+    TimerEngine_SetFiredCallback(timer_fired_cb);
+    ESP_LOGI(TAG, "Timer fired callback registered");
 
     /* 15. BOOT key detection task */
     xTaskCreatePinnedToCore(boot_key_task, "boot_key", 4 * 1024, nullptr, 5, nullptr, 1);

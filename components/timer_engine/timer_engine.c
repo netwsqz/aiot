@@ -151,3 +151,8 @@ const timer_instance_t *TimerEngine_GetPomodoro(void)
     xSemaphoreGive(s_mutex);
     return active ? &snapshot : NULL;
 }
+
+void TimerEngine_SetFiredCallback(timer_fired_cb_t cb)
+{
+    s_fired_cb = cb;
+}

@@ -277,6 +277,109 @@ static void refresh_pomodoro_page(void)
 }
 static void refresh_reminder_page(void) { /* Task 5 */ }
 
+/* ============ 满屏到点提醒 ============ */
+static void alert_click_cb(lv_event_t *e)
+{
+    (void)e;
+    s_alert_showing = false;
+    if (s_last_fired_kind == TIMER_KIND_POMODORO) {
+        /* 番茄钟到点 → 回番茄钟页（已变未运行） */
+        TimerUi_ShowPage(TIMER_PAGE_POMODORO);
+        lv_screen_load(s_timer_screen);
+    } else {
+        /* 提醒到点 → 回到弹提醒前的屏幕 */
+        lv_screen_load(s_screen_before_alert);
+    }
+    /* 下一秒 TickUpdate 会自动弹队列里下一个 */
+}
+
+static void build_alert_screen(void)
+{
+    s_alert_screen = lv_obj_create(NULL);
+    lv_obj_set_size(s_alert_screen, 200, 200);
+    lv_obj_set_scrollbar_mode(s_alert_screen, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_bg_color(s_alert_screen, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_alert_screen, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_alert_screen, 0, 0);
+    lv_obj_set_style_radius(s_alert_screen, 0, 0);
+    lv_obj_set_style_pad_all(s_alert_screen, 0, 0);
+    lv_obj_add_flag(s_alert_screen, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_alert_screen, alert_click_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *bell = lv_label_create(s_alert_screen);
+    lv_obj_set_pos(bell, 0, 18);
+    lv_obj_set_size(bell, 200, 32);
+    lv_label_set_text(bell, LV_SYMBOL_BELL);
+    lv_obj_set_style_text_font(bell, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_align(bell, LV_TEXT_ALIGN_CENTER, 0);
+
+    lv_obj_t *title = lv_label_create(s_alert_screen);
+    lv_obj_set_pos(title, 0, 56);
+    lv_obj_set_size(title, 200, 18);
+    lv_label_set_text(title, "时间到");
+    lv_obj_set_style_text_font(title, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_alert_type_lbl = lv_label_create(s_alert_screen);
+    lv_obj_set_pos(s_alert_type_lbl, 0, 80);
+    lv_obj_set_size(s_alert_type_lbl, 200, 16);
+    lv_obj_set_style_text_font(s_alert_type_lbl, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_align(s_alert_type_lbl, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_alert_dur_lbl = lv_label_create(s_alert_screen);
+    lv_obj_set_pos(s_alert_dur_lbl, 0, 100);
+    lv_obj_set_size(s_alert_dur_lbl, 200, 16);
+    lv_obj_set_style_text_font(s_alert_dur_lbl, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_align(s_alert_dur_lbl, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_alert_time_lbl = lv_label_create(s_alert_screen);
+    lv_obj_set_pos(s_alert_time_lbl, 0, 124);
+    lv_obj_set_size(s_alert_time_lbl, 200, 32);
+    lv_obj_set_style_text_font(s_alert_time_lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_align(s_alert_time_lbl, LV_TEXT_ALIGN_CENTER, 0);
+
+    lv_obj_t *hint = lv_label_create(s_alert_screen);
+    lv_obj_set_pos(hint, 0, 172);
+    lv_obj_set_size(hint, 200, 16);
+    lv_label_set_text(hint, "点屏幕任意处关闭");
+    lv_obj_set_style_text_font(hint, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+}
+
+static void fill_alert_content(const fired_item_t *item)
+{
+    char buf[64];
+    if (item->kind == TIMER_KIND_POMODORO) {
+        lv_label_set_text(s_alert_type_lbl, "番茄钟");
+        snprintf(buf, sizeof(buf), "%u 分钟已完成", (unsigned)(item->total_seconds / 60));
+    } else {
+        lv_label_set_text(s_alert_type_lbl, "定时提醒");
+        snprintf(buf, sizeof(buf), "%u 分钟已到", (unsigned)(item->total_seconds / 60));
+    }
+    lv_label_set_text(s_alert_dur_lbl, buf);
+
+    rtc_datetime_t dt = PortRtc_GetTime();
+    snprintf(buf, sizeof(buf), "%02u:%02u", dt.hour, dt.minute);
+    lv_label_set_text(s_alert_time_lbl, buf);
+}
+
+static void show_alert(const fired_item_t *item)
+{
+    s_alert_showing = true;
+    s_last_fired_kind = item->kind;
+    s_screen_before_alert = lv_screen_active();
+    if (!s_alert_screen) build_alert_screen();
+    fill_alert_content(item);
+    lv_screen_load(s_alert_screen);
+    ESP_LOGI(TAG, "Alert shown: kind=%d", item->kind);
+}
+
+static void refresh_visible_page(void)
+{
+    if (s_current_page == TIMER_PAGE_POMODORO) refresh_pomodoro_page();
+    else if (s_current_page == TIMER_PAGE_REMINDER) refresh_reminder_page();
+}
+
 /* ============ 公开 API ============ */
 esp_err_t TimerUi_Init(void)
 {
@@ -327,7 +430,28 @@ void TimerUi_SetBackCallback(void (*cb)(void)) { s_back_cb = cb; }
 
 void TimerUi_PushFiredEvent(uint8_t id, timer_kind_t kind, uint32_t total_seconds)
 {
-    (void)id; (void)kind; (void)total_seconds;  /* Task 4 实现 */
+    if (!s_fired_queue) return;
+    fired_item_t item = { id, kind, total_seconds };
+    xQueueSend(s_fired_queue, &item, 0);
 }
 
-void TimerUi_TickUpdate(void) { /* Task 4 实现 */ }
+void TimerUi_TickUpdate(void)
+{
+    if (!s_fired_queue) return;
+
+    /* 1. 每秒轮询到点队列 */
+    if (!s_alert_showing) {
+        fired_item_t item;
+        if (xQueueReceive(s_fired_queue, &item, 0) == pdTRUE) {
+            show_alert(&item);
+        }
+    }
+    if (s_alert_showing) return;
+
+    /* 2. 每分钟刷新可见的 timer 子页面（倒计时数字/进度条/提醒列表） */
+    static uint32_t sec = 0;
+    sec++;
+    if (lv_screen_active() == s_timer_screen && (sec % 60 == 0)) {
+        refresh_visible_page();
+    }
+}
