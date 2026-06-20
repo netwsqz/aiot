@@ -79,6 +79,7 @@ static void fill_slot(int slot, timer_kind_t kind, uint32_t minutes, uint8_t *ou
 esp_err_t TimerEngine_StartPomodoro(uint32_t minutes, uint8_t *out_id)
 {
     if (minutes == 0 || minutes > 180) return ESP_ERR_INVALID_ARG;
+    if (!s_mutex) return ESP_ERR_INVALID_STATE;  /* Init not called / failed */
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     if (s_slots[POMODORO_SLOT].active) {
@@ -96,6 +97,7 @@ esp_err_t TimerEngine_StartPomodoro(uint32_t minutes, uint8_t *out_id)
 esp_err_t TimerEngine_StartReminder(uint32_t minutes, uint8_t *out_id)
 {
     if (minutes == 0 || minutes > 180) return ESP_ERR_INVALID_ARG;
+    if (!s_mutex) return ESP_ERR_INVALID_STATE;  /* Init not called / failed */
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     int slot = -1;
@@ -117,6 +119,7 @@ esp_err_t TimerEngine_StartReminder(uint32_t minutes, uint8_t *out_id)
 esp_err_t TimerEngine_Cancel(uint8_t id)
 {
     if (id == 0) return ESP_ERR_INVALID_ARG;
+    if (!s_mutex) return ESP_ERR_INVALID_STATE;  /* Init not called / failed */
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     for (int i = 0; i < TIMER_MAX_SLOTS; i++) {
@@ -135,6 +138,7 @@ esp_err_t TimerEngine_Cancel(uint8_t id)
 esp_err_t TimerEngine_GetAll(timer_instance_t *out, uint8_t *count)
 {
     if (!out || !count) return ESP_ERR_INVALID_ARG;
+    if (!s_mutex) return ESP_ERR_INVALID_STATE;  /* Init not called / failed */
     uint8_t n = 0;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     for (int i = 0; i < TIMER_MAX_SLOTS; i++) {
@@ -149,6 +153,7 @@ const timer_instance_t *TimerEngine_GetPomodoro(void)
 {
     static timer_instance_t snapshot;
     bool active;
+    if (!s_mutex) return NULL;  /* Init not called / failed — avoid xSemaphoreTake assert */
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     active = s_slots[POMODORO_SLOT].active;
     if (active) snapshot = s_slots[POMODORO_SLOT];

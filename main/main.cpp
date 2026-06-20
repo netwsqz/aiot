@@ -148,23 +148,21 @@ static void data_task(void *arg)
             }
         }
 
-        /* Touch — every 200 ms */
-        if (tick % 1 == 0) {
-            /* Timer UI: poll fired queue + per-minute refresh + mini display (every 1 s) */
-            if (Lvgl_Lock(500)) {
-                TimerUi_TickUpdate();
-                const timer_instance_t *pomo = TimerEngine_GetPomodoro();
-                if (pomo)
-                    ui_update_timer_mini(true, pomo->remaining_sec, pomo->total_seconds);
-                else
-                    ui_update_timer_mini(false, 0, 0);
-                Lvgl_Unlock();
-            }
+        /* Every 1 s: timer UI tick (fired-queue poll + per-minute refresh),
+         * pomodoro mini display, and touch poll. Loop delay is 1000 ms. */
+        if (Lvgl_Lock(500)) {
+            TimerUi_TickUpdate();
+            const timer_instance_t *pomo = TimerEngine_GetPomodoro();
+            if (pomo)
+                ui_update_timer_mini(true, pomo->remaining_sec, pomo->total_seconds);
+            else
+                ui_update_timer_mini(false, 0, 0);
+            Lvgl_Unlock();
+        }
 
-            uint16_t tx, ty;
-            if (PortTouch_GetPoint(&tx, &ty)) {
-                ESP_LOGI(TAG, "Touch: (%d, %d)", tx, ty);
-            }
+        uint16_t tx, ty;
+        if (PortTouch_GetPoint(&tx, &ty)) {
+            ESP_LOGI(TAG, "Touch: (%d, %d)", tx, ty);
         }
 
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -249,8 +247,23 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "UI init done");
 
-    /* 11. Data collection task (Core 0, priority 3) */
-    xTaskCreatePinnedToCore(data_task, "data", 7 * 1024, nullptr, 3, nullptr, 0);
+    /* Timer engine + UI — MUST init before data_task starts. data_task's very
+     * first loop (tick=0) calls TimerEngine_GetPomodoro(); if the engine isn't
+     * initialized yet s_mutex is NULL and xSemaphoreTake asserts. */
+    if (TimerEngine_Init() != ESP_OK) {
+        ESP_LOGE(TAG, "Timer engine init FAILED — timer features will be no-ops");
+    }
+    ESP_LOGI(TAG, "Timer engine init done");
+
+    if (Lvgl_Lock(-1)) {
+        TimerUi_Init();
+        TimerUi_SetBackCallback(timer_back_cb);
+        Lvgl_Unlock();
+    }
+    ESP_LOGI(TAG, "Timer UI init done");
+
+    TimerEngine_SetFiredCallback(timer_fired_cb);
+    ESP_LOGI(TAG, "Timer fired callback registered");
 
     /* 12. TODO Manager */
     TodoMgr_Init();
@@ -272,20 +285,11 @@ extern "C" void app_main(void)
     TodoWeb_Init();
     ESP_LOGI(TAG, "WiFi AP + Web Server init done");
 
-    /* 16. Timer engine */
-    TimerEngine_Init();
-    ESP_LOGI(TAG, "Timer engine init done");
-
-    /* 17. Timer UI */
-    if (Lvgl_Lock(-1)) {
-        TimerUi_Init();
-        TimerUi_SetBackCallback(timer_back_cb);
-        Lvgl_Unlock();
-    }
-    ESP_LOGI(TAG, "Timer UI init done");
-
-    TimerEngine_SetFiredCallback(timer_fired_cb);
-    ESP_LOGI(TAG, "Timer fired callback registered");
+    /* 11. Data collection task (Core 0, priority 3).
+     * MUST start after TimerEngine_Init — its tick=0 loop calls
+     * TimerEngine_GetPomodoro(), which takes s_mutex; if the engine
+     * isn't up yet s_mutex is NULL and xSemaphoreTake asserts. */
+    xTaskCreatePinnedToCore(data_task, "data", 7 * 1024, nullptr, 3, nullptr, 0);
 
     /* 15. BOOT key detection task */
     xTaskCreatePinnedToCore(boot_key_task, "boot_key", 4 * 1024, nullptr, 5, nullptr, 1);
