@@ -54,12 +54,22 @@ static bool standby_load_from_spiffs(uint8_t *buf, int buf_len)
     int row_bytes = (w + 7) / 8;   /* 25 */
     int row_padded = (row_bytes + 3) & ~3;  /* 28 with padding */
 
+    /* Validate: pixel data offset (must account for color table between header and data).
+     * For 1bpp BMP with BITMAPINFOHEADER: offset = 54 (header) + 8 (2-color table × 4 bytes).
+     * We read it from the header's bfOffBits field to be robust. */
+    uint32_t pixel_offset = hdr[10] | (hdr[11] << 8) | (hdr[12] << 16) | (hdr[13] << 24);
+    if (pixel_offset < BMP_HEADER_SIZE || pixel_offset > BMP_HEADER_SIZE + 256) {
+        ESP_LOGW(TAG, "BMP pixel offset %lu looks wrong", (unsigned long)pixel_offset);
+        fclose(f);
+        return false;
+    }
+
     /* BMP stores rows bottom-up; EPD buffer is top-down.
      * Read rows in reverse order and flip into the EPD buffer. */
     uint8_t row_buf[32];  /* enough for one padded row */
     for (int y = 0; y < 200; y++) {
         int src_row = 199 - y;  /* BMP row 199 = top of image */
-        fseek(f, BMP_HEADER_SIZE + src_row * row_padded, SEEK_SET);
+        fseek(f, pixel_offset + src_row * row_padded, SEEK_SET);
         if (fread(row_buf, 1, row_bytes, f) != (size_t)row_bytes) {
             ESP_LOGW(TAG, "BMP pixel read failed at row %d", y);
             fclose(f);

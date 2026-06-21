@@ -198,11 +198,11 @@ static void enter_deep_sleep(void)
     /* 6. Deinit I2C (removes RTC, SHTC3, Touch — all on shared bus) */
     i2c_master_Deinit();
 
-    /* 7. Unmount SPIFFS cleanly before sleep */
-    esp_vfs_spiffs_unregister(NULL);
-
-    /* 8. Draw standby screen */
+    /* 7. Draw standby screen (reads SPIFFS for custom image — MUST be before unmount) */
     StandbyScreen_Draw(epd);
+
+    /* 8. Unmount SPIFFS cleanly before sleep */
+    esp_vfs_spiffs_unregister(NULL);
 
     /* 9. Hold power pins state during deep sleep */
     gpio_hold_en(EPD_PWR_PIN);     // Keep EPD powered (LOW = ON)
