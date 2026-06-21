@@ -25,6 +25,10 @@ static bool s_connected = false;
 static int s_retry_count = 0;
 #define MAX_RETRY 5
 
+/* Event handler instance handles — needed for proper unregister in Deinit */
+static esp_event_handler_instance_t s_inst_any = NULL;
+static esp_event_handler_instance_t s_inst_ip  = NULL;
+
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
 {
@@ -72,6 +76,8 @@ void WifiBsp_Init(void)
         WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, &inst_any));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &inst_ip));
+    s_inst_any = inst_any;
+    s_inst_ip  = inst_ip;
 
     /* Read credentials from NVS, fallback to Kconfig defaults */
     char ssid[33] = {0};
@@ -160,4 +166,110 @@ bool WifiBsp_SyncNtpTime(void)
              timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
 
     return true;
+}
+
+void WifiBsp_Deinit(void)
+{
+    /* 1. Unregister event handlers before deinit to avoid dangling callbacks */
+    if (s_inst_any) {
+        esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_inst_any);
+        s_inst_any = NULL;
+    }
+    if (s_inst_ip) {
+        esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, s_inst_ip);
+        s_inst_ip = NULL;
+    }
+
+    /* 2. Disconnect + stop + deinit WiFi driver */
+    esp_wifi_disconnect();
+    esp_wifi_stop();
+    esp_wifi_deinit();
+
+    /* 3. Free event group */
+    if (s_wifi_event_group) {
+        vEventGroupDelete(s_wifi_event_group);
+        s_wifi_event_group = NULL;
+    }
+
+    s_connected = false;
+    s_retry_count = 0;
+    ESP_LOGI(TAG, "WiFi deinit done");
+}
+
+esp_err_t WifiBsp_SetCredentials(const char *ssid, const char *password)
+{
+    if (!ssid || strlen(ssid) == 0) return ESP_ERR_INVALID_ARG;
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open("wifi", NVS_READWRITE, &nvs);
+    if (err != ESP_OK) return err;
+
+    err = nvs_set_str(nvs, "ssid", ssid);
+    if (err != ESP_OK) { nvs_close(nvs); return err; }
+
+    /* password can be empty (open network) */
+    const char *pass = (password) ? password : "";
+    err = nvs_set_str(nvs, "password", pass);
+    nvs_commit(nvs);
+    nvs_close(nvs);
+
+    ESP_LOGI(TAG, "Credentials saved: SSID=%s", ssid);
+    return err;
+}
+
+esp_err_t WifiBsp_Reconnect(void)
+{
+    /* Read credentials from NVS */
+    char ssid[33] = {0};
+    char password[65] = {0};
+    nvs_handle_t nvs;
+    size_t ssid_len = sizeof(ssid) - 1;
+    size_t pass_len = sizeof(password) - 1;
+
+    if (nvs_open("wifi", NVS_READONLY, &nvs) == ESP_OK) {
+        if (nvs_get_str(nvs, "ssid", ssid, &ssid_len) != ESP_OK) {
+            strncpy(ssid, CONFIG_WIFI_SSID, sizeof(ssid) - 1);
+        }
+        if (nvs_get_str(nvs, "password", password, &pass_len) != ESP_OK) {
+            strncpy(password, CONFIG_WIFI_PASSWORD, sizeof(password) - 1);
+        }
+        nvs_close(nvs);
+    } else {
+        strncpy(ssid, CONFIG_WIFI_SSID, sizeof(ssid) - 1);
+        strncpy(password, CONFIG_WIFI_PASSWORD, sizeof(password) - 1);
+    }
+
+    /* Disconnect and reconnect */
+    s_connected = false;
+    s_retry_count = 0;
+
+    esp_wifi_disconnect();
+
+    wifi_config_t wifi_config = {};
+    strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    esp_wifi_connect();
+
+    ESP_LOGI(TAG, "Reconnecting to: %s", ssid);
+    return ESP_OK;
+}
+
+esp_err_t WifiBsp_GetSsid(char *buf, size_t buf_len)
+{
+    if (!buf || buf_len == 0) return ESP_ERR_INVALID_ARG;
+
+    nvs_handle_t nvs;
+    size_t len = buf_len - 1;
+
+    if (nvs_open("wifi", NVS_READONLY, &nvs) == ESP_OK) {
+        esp_err_t err = nvs_get_str(nvs, "ssid", buf, &len);
+        nvs_close(nvs);
+        if (err == ESP_OK) return ESP_OK;
+    }
+
+    /* Fallback to Kconfig default */
+    strncpy(buf, CONFIG_WIFI_SSID, buf_len - 1);
+    buf[buf_len - 1] = '\0';
+    return ESP_OK;
 }

@@ -11,6 +11,8 @@
 static const char *TAG = "lvgl_port";
 static SemaphoreHandle_t lvgl_mux = NULL;
 static epaper_driver_display *s_epd = NULL;
+static esp_timer_handle_t s_tick_timer = NULL;
+static TaskHandle_t s_lvgl_task_handle = NULL;
 
 /* ── EPD flush (RGB565 → 1bpp) ────────────────────── */
 static void epd_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *color_p)
@@ -107,16 +109,15 @@ void Lvgl_PortInit(void)
     ESP_LOGI(TAG, "Touch indev registered");
 
     /* Tick timer (5 ms) */
-    esp_timer_handle_t tick_timer = NULL;
     esp_timer_create_args_t tick_args = {};
     tick_args.callback = tick_timer_cb;
     tick_args.name = "lvgl_tick";
-    ESP_ERROR_CHECK(esp_timer_create(&tick_args, &tick_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(tick_timer, LVGL_TICK_PERIOD_MS * 1000));
+    ESP_ERROR_CHECK(esp_timer_create(&tick_args, &s_tick_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(s_tick_timer, LVGL_TICK_PERIOD_MS * 1000));
 
     /* Handler task: core 1, 8 KB stack, priority 4 */
     xTaskCreatePinnedToCore(lvgl_handler_task, "lvgl_handler",
-                            8 * 1024, NULL, 4, NULL, 1);
+                            8 * 1024, NULL, 4, &s_lvgl_task_handle, 1);
 
     ESP_LOGI(TAG, "LVGL port ready (tick + handler running)");
 }
@@ -132,4 +133,29 @@ void Lvgl_Unlock(void)
 {
     assert(lvgl_mux);
     xSemaphoreGive(lvgl_mux);
+}
+
+void Lvgl_PortDeinit(void)
+{
+    /* Stop tick timer first */
+    if (s_tick_timer) {
+        esp_timer_stop(s_tick_timer);
+        esp_timer_delete(s_tick_timer);
+        s_tick_timer = NULL;
+    }
+
+    /* Delete LVGL handler task */
+    if (s_lvgl_task_handle) {
+        vTaskDelete(s_lvgl_task_handle);
+        s_lvgl_task_handle = NULL;
+    }
+
+    /* Delete mutex */
+    if (lvgl_mux) {
+        vSemaphoreDelete(lvgl_mux);
+        lvgl_mux = NULL;
+    }
+
+    s_epd = NULL;
+    ESP_LOGI(TAG, "LVGL port deinit done");
 }

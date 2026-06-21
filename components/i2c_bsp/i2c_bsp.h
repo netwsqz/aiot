@@ -11,6 +11,7 @@ extern "C" {
 #endif
 
 void i2c_master_Init(void);
+void i2c_master_Deinit(void);
 i2c_master_bus_handle_t i2c_get_bus_handle(void);
 
 int i2c_write_buff(i2c_master_dev_handle_t dev_handle, int reg, uint8_t *buf, uint8_t len);

@@ -1,5 +1,7 @@
 #include "todo_web.h"
 #include "todo_manager.h"
+#include "standby_screen.h"
+#include "wifi_bsp.h"
 #include <cstring>
 #include <esp_http_server.h>
 #include <esp_log.h>
@@ -325,6 +327,15 @@ static esp_err_t handle_options(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── Standby image handlers (forward-declared for dispatcher) ── */
+static esp_err_t handle_get_standby(httpd_req_t *req);
+static esp_err_t handle_upload_standby(httpd_req_t *req);
+static esp_err_t handle_delete_standby(httpd_req_t *req);
+
+/* ── WiFi config handlers (forward-declared for dispatcher) ── */
+static esp_err_t handle_get_wifi(httpd_req_t *req);
+static esp_err_t handle_post_wifi(httpd_req_t *req);
+
 /* ── Main dispatcher: single catch-all for all API routes ── */
 static esp_err_t api_dispatcher(httpd_req_t *req)
 {
@@ -373,11 +384,152 @@ static esp_err_t api_dispatcher(httpd_req_t *req)
         if (method == HTTP_DELETE) return handle_delete_task(req);
     }
 
+    /* ── Standby image API ── */
+    if (strcmp(uri, "/api/standby") == 0) {
+        if (method == HTTP_GET)  return handle_get_standby(req);
+        if (method == HTTP_POST) return handle_upload_standby(req);
+        if (method == HTTP_DELETE) return handle_delete_standby(req);
+    }
+
+    /* ── WiFi config API ── */
+    if (strcmp(uri, "/api/wifi") == 0) {
+        if (method == HTTP_GET)  return handle_get_wifi(req);
+        if (method == HTTP_POST) return handle_post_wifi(req);
+    }
+
+    /* OPTIONS — CORS preflight for any /api/ route */
+    if (method == HTTP_OPTIONS && strncmp(uri, "/api/", 5) == 0) {
+        return handle_options(req);
+    }
+
     ESP_LOGW(TAG, "No route for %s %s", (method == HTTP_GET) ? "GET" :
              (method == HTTP_POST) ? "POST" :
              (method == HTTP_PUT) ? "PUT" :
              (method == HTTP_DELETE) ? "DELETE" : "?", uri);
     return send_error(req, "Not found", 404);
+}
+
+/* ── Standby image handlers ─────────────────────────── */
+
+#define BMP_HEADER_SIZE   54
+#define BMP_COLOR_TABLE   8   /* 2 entries × 4 bytes */
+#define BMP_DATA_OFFSET   (BMP_HEADER_SIZE + BMP_COLOR_TABLE)  /* 62 */
+#define BMP_ROW_BYTES     25  /* 200/8 */
+#define BMP_ROW_PADDED    28  /* next 4-byte boundary */
+#define BMP_PIXEL_SIZE    5000
+
+/* GET /api/standby — return current custom image as BMP, or 404 */
+static esp_err_t handle_get_standby(httpd_req_t *req)
+{
+    FILE *f = fopen("/spiffs/standby.bmp", "rb");
+    if (!f) {
+        return send_error(req, "No custom standby image", 404);
+    }
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    httpd_resp_set_type(req, "image/bmp");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    /* Stream in chunks to avoid large allocation */
+    uint8_t chunk[512];
+    long remaining = fsize;
+    while (remaining > 0) {
+        int to_read = (remaining > (long)sizeof(chunk)) ? (int)sizeof(chunk) : (int)remaining;
+        int got = fread(chunk, 1, to_read, f);
+        if (got <= 0) break;
+        httpd_resp_send_chunk(req, (const char *)chunk, got);
+        remaining -= got;
+    }
+    fclose(f);
+    httpd_resp_send_chunk(req, NULL, 0);  /* end chunked response */
+    return ESP_OK;
+}
+
+/* POST /api/standby — upload raw 1bpp pixel data (5000 bytes) as JSON base64,
+ * or as raw binary body. We accept raw binary (application/octet-stream)
+ * of exactly 5000 bytes. */
+static esp_err_t handle_upload_standby(httpd_req_t *req)
+{
+    if (req->content_len != BMP_PIXEL_SIZE) {
+        ESP_LOGW(TAG, "Standby upload: expected %d bytes, got %d", BMP_PIXEL_SIZE, req->content_len);
+        return send_error(req, "Expected 5000 bytes (200x200 1bpp raw)", 400);
+    }
+
+    uint8_t *buf = (uint8_t *)malloc(BMP_PIXEL_SIZE);
+    if (!buf) return send_error(req, "Out of memory", 500);
+
+    int total = 0;
+    while (total < BMP_PIXEL_SIZE) {
+        int ret = httpd_req_recv(req, (char *)buf + total, BMP_PIXEL_SIZE - total);
+        if (ret <= 0) {
+            free(buf);
+            return send_error(req, "Receive failed", 500);
+        }
+        total += ret;
+    }
+
+    bool ok = StandbyScreen_SaveBmp(buf, BMP_PIXEL_SIZE);
+    free(buf);
+
+    if (!ok) return send_error(req, "Save failed", 500);
+    return send_ok(req, NULL);
+}
+
+/* DELETE /api/standby — remove custom image */
+static esp_err_t handle_delete_standby(httpd_req_t *req)
+{
+    StandbyScreen_DeleteBmp();
+    return send_ok(req, NULL);
+}
+
+/* ── WiFi config handlers ─────────────────────────── */
+
+/* GET /api/wifi — return current SSID (no password) and connection status */
+static esp_err_t handle_get_wifi(httpd_req_t *req)
+{
+    char ssid[33] = {0};
+    WifiBsp_GetSsid(ssid, sizeof(ssid));
+
+    cJSON *data = cJSON_CreateObject();
+    cJSON_AddStringToObject(data, "ssid", ssid);
+    cJSON_AddBoolToObject(data, "connected", WifiBsp_IsConnected());
+    return send_ok(req, data);
+}
+
+/* POST /api/wifi — save new credentials and reconnect */
+static esp_err_t handle_post_wifi(httpd_req_t *req)
+{
+    cJSON *body = parse_body(req);
+    if (!body) return send_error(req, "Invalid JSON", 400);
+
+    cJSON *jssid = cJSON_GetObjectItem(body, "ssid");
+    if (!jssid || !jssid->valuestring || strlen(jssid->valuestring) == 0) {
+        cJSON_Delete(body);
+        return send_error(req, "Missing SSID", 400);
+    }
+
+    cJSON *jpass = cJSON_GetObjectItem(body, "password");
+    const char *password = (jpass && jpass->valuestring) ? jpass->valuestring : "";
+
+    esp_err_t err = WifiBsp_SetCredentials(jssid->valuestring, password);
+    if (err != ESP_OK) {
+        cJSON_Delete(body);
+        return send_error(req, "Failed to save credentials", 500);
+    }
+
+    /* Reconnect with new credentials */
+    err = WifiBsp_Reconnect();
+    cJSON_Delete(body);
+
+    if (err != ESP_OK) return send_error(req, "Reconnect failed", 500);
+
+    cJSON *data = cJSON_CreateObject();
+    cJSON_AddStringToObject(data, "ssid", jssid->valuestring);
+    cJSON_AddBoolToObject(data, "reconnecting", true);
+    return send_ok(req, data);
 }
 
 esp_err_t TodoWeb_Init(void)
@@ -393,7 +545,7 @@ esp_err_t TodoWeb_Start(void)
     if (s_server) return ESP_OK;
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 4;
+    config.max_uri_handlers = 6;
     config.stack_size = 8192;
     config.uri_match_fn = httpd_uri_match_wildcard;
 
@@ -419,6 +571,9 @@ esp_err_t TodoWeb_Start(void)
 
     httpd_uri_t uri_api_delete = { .uri = "/api/*", .method = HTTP_DELETE, .handler = api_dispatcher };
     httpd_register_uri_handler(s_server, &uri_api_delete);
+
+    httpd_uri_t uri_api_options = { .uri = "/api/*", .method = HTTP_OPTIONS, .handler = api_dispatcher };
+    httpd_register_uri_handler(s_server, &uri_api_options);
 
     ESP_LOGI(TAG, "HTTP server started (catch-all /api/* dispatcher)");
     return ESP_OK;

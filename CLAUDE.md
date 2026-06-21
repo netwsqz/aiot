@@ -1,28 +1,125 @@
-# AIoT - ESP32-S3 1.54" 墨水屏 固件项目
+# CLAUDE.md
 
-## 开发环境
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-ESP-IDF v5.5.4，安装在 `E:\esp\.espressif\v5.5.4\esp-idf`
+## Build & Flash
 
-**重要：Claude Code 调用 idf.py 的方式**
-- Bash 工具运行在 Git Bash (MSys) 环境，ESP-IDF v5.5.4 拒绝 MSys
-- 必须通过 `env -u MSYSTEM` 去除 MSys 环境变量后调用 powershell.exe：
-  ```bash
-  env -u MSYSTEM powershell.exe -ExecutionPolicy Bypass -Command \
-    "[Environment]::SetEnvironmentVariable('MSYSTEM', \$null, 'Process'); \
-     . E:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1; \
-     cd E:\aiot; idf.py build"
-  ```
-- 用户在 Windows Terminal 里直接用 PowerShell 加载 profile 即可
+ESP-IDF v5.5.4, installed at `E:\esp\.espressif\v5.5.4\esp-idf`.
 
-## 硬件平台
+**Critical**: Claude Code's Bash tool runs in Git Bash (MSys). ESP-IDF v5.5.4 rejects MSys. You MUST strip the `MSYSTEM` env var and call PowerShell:
 
-微雪 ESP32-S3 1.54" 墨水屏 AIoT 开发板
+```bash
+# Build (from any directory)
+env -u MSYSTEM powershell.exe -ExecutionPolicy Bypass -Command \
+  "[Environment]::SetEnvironmentVariable('MSYSTEM', \$null, 'Process'); \
+   . E:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1; \
+   cd E:\aiot; idf.py build"
 
-### GPIO 分配
+# Flash
+env -u MSYSTEM powershell.exe -ExecutionPolicy Bypass -Command \
+  "[Environment]::SetEnvironmentVariable('MSYSTEM', \$null, 'Process'); \
+   . E:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1; \
+   cd E:\aiot; idf.py -p COM5 flash"
 
-| GPIO | 功能 | 备注 |
-|------|------|------|
+# Clean build
+env -u MSYSTEM powershell.exe -ExecutionPolicy Bypass -Command \
+  "[Environment]::SetEnvironmentVariable('MSYSTEM', \$null, 'Process'); \
+   . E:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1; \
+   cd E:\aiot; idf.py fullclean"
+```
+
+User's native shell: PowerShell with `E:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1` loaded.
+
+## Architecture
+
+Three-layer component architecture, all wired in `main/main.cpp`:
+
+```
+┌─────────────────────────────────────────────────┐
+│ main.cpp  (app_main — init sequence, tasks)     │
+├─────────────────────────────────────────────────┤
+│ Application:  todo_ui  timer_ui  todo_web       │
+│               todo_manager  timer_engine        │
+│               wifi_bsp  wifi_ap  standby_screen │
+├─────────────────────────────────────────────────┤
+│ LVGL/UI:      lvgl_port  ui  font_cn           │
+├─────────────────────────────────────────────────┤
+│ BSP/HAL:      epaper_driver_bsp  i2c_bsp        │
+│               port_shtc3  port_rtc  port_touch  │
+│               port_battery                       │
+└─────────────────────────────────────────────────┘
+```
+
+- **BSP layer** (`*_bsp`, `port_*`): Hardware abstraction. I2C bus is shared on IO47/IO48 (addresses 0x70/0x51/0x38 don't conflict).
+- **LVGL bridge** (`lvgl_port`): Connects C++ EPD driver to LVGL flush callback. All UI updates must go through `Lvgl_Lock()`/`Lvgl_Unlock()`.
+- **Application modules** (`todo_*`, `timer_*`, `wifi_*`): Self-contained C components with `extern "C"` headers. Each owns its own LVGL screen.
+- **Only `main.cpp` is C++** — everything else is C or C-with-extern-C-wrapper.
+
+### Key data flows
+
+- **TODO**: Phone → WiFi AP → HTTP REST (`todo_web`) → NVS (`todo_manager`) → LVGL screen (`todo_ui`)
+- **Timer**: Button/touch → `timer_engine` (FreeRTOS timers) → NVS persist → `timer_ui` (fullscreen alert)
+- **Sensors**: FreeRTOS `data_task` polls SHTC3/RTC/Battery → updates `ui` dashboard
+- **Deep sleep**: Double-PWR → `esp_deep_sleep_start()` → wake re-runs `app_main()` (different init path, skips WiFi)
+
+### LVGL on e-ink constraints
+
+- **LVGL v9** (managed component, Kconfig — no `lv_conf.h`)
+- **No animations, no shadows** — e-ink refresh is ~300ms, no partial animation possible
+- **Use `lv_font_chinese_14`** for any Chinese text (Source Han Sans SC, line_height=16px). Montserrat fonts lack CJK glyphs.
+- **LVGL v8 vs v9 API**: This project uses LVGL v9. If referencing Waveshare V2 examples, they use LVGL v8 — `lv_obj_set_flex_gap()` is v9-only, `lv_obj_set_style_pad_column()` works in both.
+- **Partial refresh**: Must call `EPD_DisplayPartBaseImage()` before any partial update. SSD1681 LUT arrays must be complete (159 values for `WF_PARTIAL_1IN54_0`) or BUSY pin hangs.
+- **Checkbox label wrapping**: Must set `LV_LABEL_LONG_WRAP` on the internal label child (index 1) and limit width on both the checkbox and its label.
+
+## Hardware Pinout (Quick Reference)
+
+| GPIO | Function | Note |
+|------|----------|------|
+| IO0  | BOOT btn | Active low, internal pullup |
+| IO4  | Battery ADC | ADC1_CH3, 2:1 voltage divider |
+| IO5  | RTC alarm IRQ | Deep sleep wake source |
+| IO6  | EPD power | **Active low** |
+| IO8  | EPD BUSY | Input |
+| IO9  | EPD RST | |
+| IO11 | EPD SPI CS | Manual GPIO toggle |
+| IO12/13 | EPD SPI CLK/MOSI | |
+| IO17 | VBAT power | Active high |
+| IO18 | PWR btn / wake | Active low, deep sleep wake |
+| IO21 | Touch IRQ | Falling edge |
+| IO42 | Audio PA EN | **Active low** |
+| IO47/48 | I2C SDA/SCL | Shared: SHTC3(0x70), RTC(0x51), Touch(0x38) |
+
+Full pinout and peripheral details in GPIO table below.
+
+## Common Patterns
+
+### Adding a new LVGL screen
+1. Create component with `*_init()`, `*_get_screen()` returning `lv_obj_t*`
+2. Screen size: 200×200, white bg, no border, no radius, no pad
+3. Register in `main.cpp`: init → add to `ui_switch_page()` dispatch
+4. All `lv_*` calls must be inside `Lvgl_Lock()`/`Lvgl_Unlock()`
+
+### NVS persistence pattern
+- Key namespace + single blob per record
+- `TodoMgr_*` and `TimerEngine_Persist/Restore` are the established patterns
+- Deep sleep wake path restores state from NVS without network
+
+### Static ID pools for LVGL callbacks
+LVGL event `user_data` must point to memory that outlives the function call. Stack arrays die on return. Use static pools like `s_list_id_pool[TODO_MAX_LISTS][TODO_ID_LEN]` — see `todo_ui.cpp` for the pattern.
+
+## Reference
+
+- Waveshare V2 examples: `V2/` (13 projects, LVGL v8 unless noted)
+- Design specs: `docs/superpowers/specs/`
+- Implementation plans: `docs/superpowers/plans/`
+- Web UI (standalone dev): `web_dev/index.html`
+
+---
+
+## GPIO Full Table
+
+| GPIO | Function | Note |
+|------|----------|------|
 | IO0  | BOOT 按键 | 低有效，带内部上拉 |
 | IO3  | LED | |
 | IO4  | 电池 ADC | ADC1_CH3, 分压比 2:1 |
@@ -53,19 +150,7 @@ ESP-IDF v5.5.4，安装在 `E:\esp\.espressif\v5.5.4\esp-idf`
 | IO47 | I2C SDA | 触摸屏/RTC/SHTC3 共用 |
 | IO48 | I2C SCL | 触摸屏/RTC/SHTC3 共用 |
 
-### 外设
-
-- **墨水屏**：1.54" V2, SSD1681 驱动, 200x200, SPI 接口, SPI2_HOST, 40MHz
-- **温湿度传感器**：SHTC3 (I2C 0x70, 300kHz)
-- **触摸屏**：FT6336 (I2C 0x38, 400kHz), 复位 IO7, 中断 IO21
-- **RTC**：PCF85063 (I2C 0x51, 300kHz), 闹钟中断 IO5
-- **SD 卡**：SDMMC 1-bit (CLK=IO39, D0=IO40, CMD=IO41)
-- **I2S 音频**：MCLK=IO14, SCLK=IO15, ASDOUT=IO16, LRCK=IO38, DSDIN=IO45
-- **功放**：PA EN=IO18/IO42, PA CTRL=IO46
-- **电池**：ADC=IO4 (ADC1_CH3, 分压 2:1), Control=IO17
-- **UART**：TX=IO43, RX=IO44
-
-### 硬件要点
+## 硬件要点
 
 - **PSRAM 必须启用** — 墨水屏显存和 LVGL 缓冲区分配在 PSRAM
 - **I2C 总线共用** — SHTC3/RTC/触摸屏共用 IO47/IO48，地址 0x70/0x51/0x38 不冲突
@@ -76,59 +161,3 @@ ESP-IDF v5.5.4，安装在 `E:\esp\.espressif\v5.5.4\esp-idf`
 - **SHTC3 无寄存器地址** — 用 write_read 方式通信
 - **深睡眠唤醒后重新执行 app_main()** — 不是从睡眠点恢复
 - **read_busy() 需要安全超时** — V2 原版无限等待，已加 5 秒超时防止死锁
-
-### 微雪官方示例
-
-`E:\aiot\V2/` 下有 13 个示例工程，完整参考见 `docs/waveshare-examples-reference.md`
-
-## 开发进度
-
-### Phase 1 - 本地功能 ✅
-- [x] 项目骨架 (CMakeLists / sdkconfig.defaults / 分区表)
-- [x] I2C 总线初始化 (`i2c_bsp`)
-- [x] SHTC3 温湿度采集 (`port_shtc3`)
-- [x] RTC 时间 (`port_rtc`)
-- [x] 墨水屏驱动 (`epaper_driver_bsp`) — LUT Bug 已修复
-- [x] LVGL UI 四象限布局 (`lvgl_port` + `ui`)
-- [x] 触摸屏 (`port_touch`)
-- [x] 电池 ADC (`port_battery`)
-- [x] WiFi STA + NTP 同步 (`wifi_bsp`)
-- [x] 完整 main.cpp 初始化流程 + 数据采集任务
-- [ ] WiFi 凭据配置（当前是默认占位符，需改 sdkconfig.defaults）
-
-### Phase 2 - AIoT 集成
-- [ ] 小智AI 云端集成
-- [ ] AI 回复 + 温湿度混合显示
-
-### 已知问题
-- WiFi SSID/密码需在 `sdkconfig.defaults` 或 `idf.py menuconfig` 中配置
-
-## 命令参考
-
-```powershell
-# 用户在 Windows Terminal 里
-. E:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1
-
-# 构建
-idf.py build
-
-# 烧录
-idf.py -p COM5 flash
-
-# 串口监视
-idf.py -p COM5 monitor
-
-# 清理
-idf.py fullclean
-
-# 菜单配置 (WiFi 凭据等)
-idf.py menuconfig
-```
-
-```bash
-# Claude Code (Bash 工具) 构建/烧录
-env -u MSYSTEM powershell.exe -ExecutionPolicy Bypass -Command \
-  "[Environment]::SetEnvironmentVariable('MSYSTEM', \$null, 'Process'); \
-   . E:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1; \
-   cd E:\aiot; idf.py build"
-```

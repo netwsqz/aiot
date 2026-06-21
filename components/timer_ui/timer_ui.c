@@ -115,6 +115,7 @@ static void create_tools_page(lv_obj_t *parent)
     lv_obj_set_pos(title, 48, 10);
     lv_label_set_text(title, "时间工具");
     lv_obj_set_style_text_font(title, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_black(), 0);
     lv_obj_set_style_text_decor(title, LV_TEXT_DECOR_UNDERLINE, 0);
 
     const char *names[2] = {"番茄钟", "定时提醒"};
@@ -159,6 +160,7 @@ static void create_pomo_page(lv_obj_t *parent)
     lv_obj_set_pos(title, 48, 10);
     lv_label_set_text(title, "番茄钟");
     lv_obj_set_style_text_font(title, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_black(), 0);
     lv_obj_set_style_text_decor(title, LV_TEXT_DECOR_UNDERLINE, 0);
 
     /* ---- 未运行：选时长 ---- */
@@ -174,6 +176,7 @@ static void create_pomo_page(lv_obj_t *parent)
     lv_obj_set_size(hint, 200, 16);
     lv_label_set_text(hint, "选择时长");
     lv_obj_set_style_text_font(hint, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(hint, lv_color_black(), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 
     for (int i = 0; i < 3; i++) {
@@ -325,6 +328,7 @@ static void create_rem_page(lv_obj_t *parent)
     lv_obj_set_size(hint, 200, 14);
     lv_label_set_text(hint, "分钟后提醒");
     lv_obj_set_style_text_font(hint, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(hint, lv_color_black(), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 
     /* 已挂列表 */
@@ -346,12 +350,15 @@ static void create_rem_page(lv_obj_t *parent)
     lv_obj_set_style_border_width(s_confirm_panel, 1, 0);
     lv_obj_set_style_radius(s_confirm_panel, 4, 0);
     lv_obj_set_style_pad_all(s_confirm_panel, 4, 0);
+    lv_obj_set_style_shadow_width(s_confirm_panel, 0, 0);
+    lv_obj_add_flag(s_confirm_panel, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
 
     lv_obj_t *q = lv_label_create(s_confirm_panel);
-    lv_obj_set_pos(q, 0, 6);
-    lv_obj_set_size(q, 122, 16);
-    lv_label_set_text(q, "确认取消？");
+    lv_obj_set_pos(q, 0, 4);
+    lv_obj_set_size(q, 122, 20);
+    lv_label_set_text(q, "确认取消?");
     lv_obj_set_style_text_font(q, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(q, lv_color_black(), 0);
     lv_obj_set_style_text_align(q, LV_TEXT_ALIGN_CENTER, 0);
 
     lv_obj_t *no_btn = lv_btn_create(s_confirm_panel);
@@ -360,10 +367,13 @@ static void create_rem_page(lv_obj_t *parent)
     lv_obj_set_style_bg_color(no_btn, lv_color_white(), 0);
     lv_obj_set_style_border_width(no_btn, 1, 0);
     lv_obj_set_style_radius(no_btn, 4, 0);
+    lv_obj_set_style_shadow_width(no_btn, 0, 0);
+    lv_obj_set_style_pad_all(no_btn, 0, 0);
     lv_obj_add_event_cb(no_btn, confirm_no_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *nlbl = lv_label_create(no_btn);
     lv_label_set_text(nlbl, "否");
     lv_obj_set_style_text_font(nlbl, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(nlbl, lv_color_black(), 0);
     lv_obj_center(nlbl);
 
     lv_obj_t *yes_btn = lv_btn_create(s_confirm_panel);
@@ -372,10 +382,13 @@ static void create_rem_page(lv_obj_t *parent)
     lv_obj_set_style_bg_color(yes_btn, lv_color_white(), 0);
     lv_obj_set_style_border_width(yes_btn, 1, 0);
     lv_obj_set_style_radius(yes_btn, 4, 0);
+    lv_obj_set_style_shadow_width(yes_btn, 0, 0);
+    lv_obj_set_style_pad_all(yes_btn, 0, 0);
     lv_obj_add_event_cb(yes_btn, confirm_yes_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *ylbl = lv_label_create(yes_btn);
     lv_label_set_text(ylbl, "是");
     lv_obj_set_style_text_font(ylbl, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(ylbl, lv_color_black(), 0);
     lv_obj_center(ylbl);
 
     lv_obj_add_flag(s_confirm_panel, LV_OBJ_FLAG_HIDDEN);
@@ -484,6 +497,7 @@ static void build_alert_screen(void)
     lv_obj_set_size(title, 200, 18);
     lv_label_set_text(title, "时间到");
     lv_obj_set_style_text_font(title, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_black(), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
 
     s_alert_type_lbl = lv_label_create(s_alert_screen);
@@ -509,6 +523,7 @@ static void build_alert_screen(void)
     lv_obj_set_size(hint, 200, 16);
     lv_label_set_text(hint, "点屏幕任意处关闭");
     lv_obj_set_style_text_font(hint, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(hint, lv_color_black(), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 }
 

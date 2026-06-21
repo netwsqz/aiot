@@ -64,5 +64,9 @@ public:
     void EPD_Init_Partial();
     void EPD_DisplayPart();
     void EPD_DrawColorPixel(uint16_t x, uint16_t y, uint8_t color);
+
+    /** Direct access to the 1bpp frame buffer (1=white, 0=black).
+     *  Size is lcd_spi_data.buffer_len bytes (5000 for 200×200). */
+    uint8_t* GetBuffer() { return buffer; }
 };
 #endif

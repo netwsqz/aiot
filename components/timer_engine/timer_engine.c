@@ -4,6 +4,10 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/timers.h>
+#include <nvs_flash.h>
+#include <nvs.h>
+#include <time.h>
+#include "port_rtc.h"
 
 static const char *TAG = "timer_eng";
 
@@ -164,4 +168,124 @@ const timer_instance_t *TimerEngine_GetPomodoro(void)
 void TimerEngine_SetFiredCallback(timer_fired_cb_t cb)
 {
     s_fired_cb = cb;
+}
+
+/* ── NVS persistence ────────────────────────────────── */
+#define TIMER_NVS_NAMESPACE "timer"
+#define TIMER_NVS_KEY       "slots"
+
+typedef struct {
+    uint8_t  id;
+    uint8_t  kind;
+    uint32_t total_seconds;
+    uint32_t remaining_sec;
+    uint8_t  active;
+    uint8_t  _pad[3];
+} timer_slot_persist_t;   /* 12 bytes per slot */
+
+typedef struct {
+    int64_t  rtc_timestamp;                        /* save-time RTC unix seconds */
+    timer_slot_persist_t slots[TIMER_MAX_SLOTS];   /* 48 bytes */
+} timer_persist_t;                                 /* 56 bytes total */
+
+static int64_t rtc_now_unix(void)
+{
+    rtc_datetime_t dt = PortRtc_GetTime();
+    struct tm tm = {0};
+    tm.tm_year = dt.year - 1900;
+    tm.tm_mon  = dt.month - 1;
+    tm.tm_mday = dt.day;
+    tm.tm_hour = dt.hour;
+    tm.tm_min  = dt.minute;
+    tm.tm_sec  = dt.second;
+    return (int64_t)mktime(&tm);
+}
+
+esp_err_t TimerEngine_Persist(void)
+{
+    if (!s_mutex) return ESP_ERR_INVALID_STATE;
+
+    timer_persist_t data = {0};
+    data.rtc_timestamp = rtc_now_unix();
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    for (int i = 0; i < TIMER_MAX_SLOTS; i++) {
+        data.slots[i].id            = s_slots[i].id;
+        data.slots[i].kind          = (uint8_t)s_slots[i].kind;
+        data.slots[i].total_seconds = s_slots[i].total_seconds;
+        data.slots[i].remaining_sec = s_slots[i].remaining_sec;
+        data.slots[i].active        = s_slots[i].active ? 1 : 0;
+    }
+    xSemaphoreGive(s_mutex);
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(TIMER_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) return err;
+    err = nvs_set_blob(nvs, TIMER_NVS_KEY, &data, sizeof(data));
+    nvs_commit(nvs);
+    nvs_close(nvs);
+
+    ESP_LOGI(TAG, "Persist done (rtc=%lld)", data.rtc_timestamp);
+    return err;
+}
+
+esp_err_t TimerEngine_Restore(void)
+{
+    if (!s_mutex) return ESP_ERR_INVALID_STATE;
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(TIMER_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) return err;
+
+    timer_persist_t data;
+    size_t len = sizeof(data);
+    err = nvs_get_blob(nvs, TIMER_NVS_KEY, &data, &len);
+    if (err != ESP_OK) {
+        nvs_close(nvs);
+        ESP_LOGI(TAG, "No persisted timer data");
+        return err;
+    }
+
+    /* One-shot: erase after reading */
+    nvs_erase_key(nvs, TIMER_NVS_KEY);
+    nvs_commit(nvs);
+    nvs_close(nvs);
+
+    /* Compute elapsed time */
+    int64_t now_sec  = rtc_now_unix();
+    int64_t elapsed  = now_sec - data.rtc_timestamp;
+    if (elapsed < 0) elapsed = 0;
+
+    int restored = 0;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    for (int i = 0; i < TIMER_MAX_SLOTS; i++) {
+        if (!data.slots[i].active) continue;
+
+        uint32_t remaining = data.slots[i].remaining_sec;
+        if ((int64_t)remaining <= elapsed) {
+            /* Expired during sleep — silently drop */
+            continue;
+        }
+        remaining -= (uint32_t)elapsed;
+
+        s_slots[i].id            = data.slots[i].id;
+        s_slots[i].kind          = (timer_kind_t)data.slots[i].kind;
+        s_slots[i].total_seconds = data.slots[i].total_seconds;
+        s_slots[i].remaining_sec = remaining;
+        s_slots[i].active        = true;
+        restored++;
+    }
+
+    /* Recover next_id as max(id) + 1 */
+    uint8_t max_id = 0;
+    for (int i = 0; i < TIMER_MAX_SLOTS; i++) {
+        if (s_slots[i].id > max_id) max_id = s_slots[i].id;
+    }
+    s_next_id = max_id + 1;
+    if (s_next_id == 0) s_next_id = 1;
+
+    xSemaphoreGive(s_mutex);
+
+    ESP_LOGI(TAG, "Restore done: %d timers, elapsed=%llds", restored, elapsed);
+    return ESP_OK;
 }

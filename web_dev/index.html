@@ -43,6 +43,33 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 <button class="add-btn" id="addTaskBtn">+ 添加任务</button>
 <button class="danger-btn" id="delListBtn">删除清单</button>
 
+<!-- Standby Image Section -->
+<div style="margin:8px;padding:16px;background:white;border-radius:8px;">
+  <div style="font-size:16px;font-weight:bold;margin-bottom:12px;">🖼️ 待机画面</div>
+  <div style="margin-bottom:12px;">
+    <input type="file" id="standbyFile" accept="image/bmp,image/png,image/jpeg" style="font-size:14px;">
+  </div>
+  <div style="display:flex;gap:8px;margin-bottom:12px;">
+    <canvas id="standbyPreview" width="100" height="100" style="border:1px solid #ddd;border-radius:4px;background:#fff;image-rendering:pixelated;"></canvas>
+    <div style="font-size:12px;color:#666;flex:1;">
+      上传 200×200 单色图片<br>
+      支持 BMP/PNG/JPG<br>
+      自动转换为 1bpp 格式
+    </div>
+  </div>
+  <button class="add-btn" id="uploadStandbyBtn" style="background:#FF9800;">上传待机画面</button>
+  <button class="danger-btn" id="delStandbyBtn">恢复默认画面</button>
+</div>
+
+<!-- WiFi Settings Section -->
+<div style="margin:8px;padding:16px;background:white;border-radius:8px;">
+  <div style="font-size:16px;font-weight:bold;margin-bottom:12px;">📡 WiFi 设置</div>
+  <input class="modal-input" id="wifiSsid" placeholder="WiFi 名称 (SSID)" style="margin-bottom:8px;">
+  <input class="modal-input" id="wifiPassword" type="password" placeholder="WiFi 密码（开放网络留空）" style="margin-bottom:8px;">
+  <div id="wifiStatus" style="font-size:12px;color:#666;margin-bottom:8px;"></div>
+  <button class="add-btn" id="wifiSaveBtn" style="background:#2196F3;">保存并连接</button>
+</div>
+
 <div class="modal" id="taskModal">
 <div class="modal-content">
   <div class="modal-title">新建任务</div>
@@ -191,6 +218,178 @@ document.getElementById('delListBtn').onclick = async () => {
 };
 
 loadLists();
+
+/* ── Standby image upload ── */
+const standbyCanvas = document.getElementById('standbyPreview');
+const standbyCtx = standbyCanvas.getContext('2d');
+let standbyRawData = null;  // Uint8Array of 5000 bytes (1bpp, EPD format)
+
+// Preview uploaded image
+document.getElementById('standbyFile').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const img = new Image();
+  img.onload = function() {
+    // Draw to a 200x200 offscreen canvas, then convert to 1bpp
+    const offscreen = document.createElement('canvas');
+    offscreen.width = 200;
+    offscreen.height = 200;
+    const ctx = offscreen.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, 200, 200);
+    ctx.drawImage(img, 0, 0, 200, 200);
+
+    const imgData = ctx.getImageData(0, 0, 200, 200);
+    // Convert to 1bpp: EPD format (1=white, 0=black)
+    const raw = new Uint8Array(5000);
+    for (let y = 0; y < 200; y++) {
+      for (let x = 0; x < 200; x++) {
+        const idx = (y * 200 + x) * 4;
+        const gray = imgData.data[idx] * 0.299 + imgData.data[idx+1] * 0.587 + imgData.data[idx+2] * 0.114;
+        const white = gray > 128;
+        const byteIdx = y * 25 + (x >> 3);
+        const bit = 7 - (x & 7);
+        if (white) raw[byteIdx] |= (1 << bit);
+      }
+    }
+    standbyRawData = raw;
+
+    // Show preview (scale to 100x100)
+    standbyCtx.fillStyle = '#fff';
+    standbyCtx.fillRect(0, 0, 100, 100);
+    for (let y = 0; y < 200; y += 2) {
+      for (let x = 0; x < 200; x += 2) {
+        const byteIdx = y * 25 + (x >> 3);
+        const bit = 7 - (x & 7);
+        const isWhite = (raw[byteIdx] >> bit) & 1;
+        standbyCtx.fillStyle = isWhite ? '#fff' : '#000';
+        standbyCtx.fillRect(x/2, y/2, 1, 1);
+      }
+    }
+  };
+  img.src = URL.createObjectURL(file);
+});
+
+// Upload to device
+document.getElementById('uploadStandbyBtn').onclick = async function() {
+  if (!standbyRawData) return alert('请先选择图片');
+  try {
+    const res = await fetch(API + '/api/standby', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/octet-stream'},
+      body: standbyRawData
+    });
+    const data = await res.json();
+    if (data.ok) alert('待机画面已更新！');
+    else alert('上传失败: ' + data.error);
+  } catch(e) {
+    alert('上传出错: ' + e.message);
+  }
+};
+
+// Delete custom image
+document.getElementById('delStandbyBtn').onclick = async function() {
+  if (!confirm('恢复默认待机画面？')) return;
+  try {
+    await fetch(API + '/api/standby', {method: 'DELETE'});
+    standbyCtx.fillStyle = '#ddd';
+    standbyCtx.fillRect(0, 0, 100, 100);
+    standbyCtx.fillStyle = '#999';
+    standbyCtx.font = '12px sans-serif';
+    standbyCtx.textAlign = 'center';
+    standbyCtx.fillText('默认', 50, 55);
+    standbyRawData = null;
+    document.getElementById('standbyFile').value = '';
+    alert('已恢复默认画面');
+  } catch(e) {
+    alert('操作出错: ' + e.message);
+  }
+};
+
+// Try loading existing custom image on page load
+(async function() {
+  try {
+    const res = await fetch(API + '/api/standby');
+    if (res.ok) {
+      standbyCtx.fillStyle = '#4CAF50';
+      standbyCtx.fillRect(0, 0, 100, 100);
+      standbyCtx.fillStyle = '#fff';
+      standbyCtx.font = '12px sans-serif';
+      standbyCtx.textAlign = 'center';
+      standbyCtx.fillText('自定义', 50, 55);
+    }
+  } catch(e) {}
+})();
+
+/* ── WiFi settings ── */
+async function loadWifiStatus() {
+  try {
+    const res = await fetch(API + '/api/wifi');
+    const data = await res.json();
+    if (data.ok) {
+      document.getElementById('wifiSsid').value = data.data.ssid || '';
+      const status = document.getElementById('wifiStatus');
+      if (data.data.connected) {
+        status.textContent = '✅ 已连接: ' + data.data.ssid;
+        status.style.color = '#4CAF50';
+      } else {
+        status.textContent = '❌ 未连接';
+        status.style.color = '#f44336';
+      }
+    }
+  } catch(e) {}
+}
+
+document.getElementById('wifiSaveBtn').onclick = async function() {
+  const ssid = document.getElementById('wifiSsid').value.trim();
+  const password = document.getElementById('wifiPassword').value;
+  if (!ssid) return alert('请输入 WiFi 名称');
+
+  const status = document.getElementById('wifiStatus');
+  status.textContent = '⏳ 正在连接...';
+  status.style.color = '#FF9800';
+
+  try {
+    const res = await fetch(API + '/api/wifi', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ssid, password})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      status.textContent = '⏳ 凭据已保存，正在重连...';
+      // Poll connection status
+      let attempts = 0;
+      const poll = setInterval(async () => {
+        attempts++;
+        try {
+          const r = await fetch(API + '/api/wifi');
+          const d = await r.json();
+          if (d.ok && d.data.connected) {
+            status.textContent = '✅ 已连接: ' + d.data.ssid;
+            status.style.color = '#4CAF50';
+            clearInterval(poll);
+          } else if (attempts >= 15) {
+            status.textContent = '❌ 连接超时，请检查凭据';
+            status.style.color = '#f44336';
+            clearInterval(poll);
+          }
+        } catch(e) {
+          if (attempts >= 15) clearInterval(poll);
+        }
+      }, 2000);
+    } else {
+      status.textContent = '❌ 保存失败: ' + data.error;
+      status.style.color = '#f44336';
+    }
+  } catch(e) {
+    status.textContent = '❌ 出错: ' + e.message;
+    status.style.color = '#f44336';
+  }
+};
+
+loadWifiStatus();
 </script>
 </body>
 </html>

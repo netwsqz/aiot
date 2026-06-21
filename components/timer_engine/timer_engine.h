@@ -45,6 +45,14 @@ const timer_instance_t *TimerEngine_GetPomodoro(void);
 
 void TimerEngine_SetFiredCallback(timer_fired_cb_t cb);
 
+/* Persist active timers to NVS (call before deep sleep).
+ * Saves RTC timestamp + slot snapshot for elapsed-time recovery. */
+esp_err_t TimerEngine_Persist(void);
+
+/* Restore timers from NVS (call after wakeup, after TimerEngine_Init).
+ * Adjusts remaining_sec by elapsed sleep time; expired timers are dropped. */
+esp_err_t TimerEngine_Restore(void);
+
 #ifdef __cplusplus
 }
 #endif

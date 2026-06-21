@@ -34,6 +34,22 @@ void i2c_master_Init(void)
     ESP_ERROR_CHECK(i2c_master_bus_add_device(user_i2c_handle, &dev_cfg, &shtc3_handle));
 }
 
+void i2c_master_Deinit(void)
+{
+    if (rtc_dev_handle) {
+        i2c_master_bus_rm_device(rtc_dev_handle);
+        rtc_dev_handle = NULL;
+    }
+    if (shtc3_handle) {
+        i2c_master_bus_rm_device(shtc3_handle);
+        shtc3_handle = NULL;
+    }
+    if (user_i2c_handle) {
+        i2c_del_master_bus(user_i2c_handle);
+        user_i2c_handle = NULL;
+    }
+}
+
 i2c_master_bus_handle_t i2c_get_bus_handle(void)
 {
     return user_i2c_handle;

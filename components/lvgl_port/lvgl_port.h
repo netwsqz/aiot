@@ -41,6 +41,9 @@ bool Lvgl_Lock(int timeout_ms);
 /** Release LVGL mutex. */
 void Lvgl_Unlock(void);
 
+/** Stop tick timer, delete handler task and mutex. Call before deep sleep. */
+void Lvgl_PortDeinit(void);
+
 #ifdef __cplusplus
 }
 #endif
