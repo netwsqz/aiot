@@ -544,18 +544,21 @@ static void audio_stream_task(void *arg)
  * Sets s_llm_received = true when done (success or error).          *
  * ================================================================ */
 
-static char  s_http_resp[AI_LLM_TEXT_LEN];
-static int   s_http_resp_len = 0;
+typedef struct {
+    char  resp[AI_LLM_TEXT_LEN];
+    int   resp_len;
+} llm_ctx_t;
 
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
-    if (evt->event_id == HTTP_EVENT_ON_DATA) {
+    llm_ctx_t *ctx = (llm_ctx_t *)evt->user_data;
+    if (evt->event_id == HTTP_EVENT_ON_DATA && ctx) {
         int copy = evt->data_len;
-        int space = (int)sizeof(s_http_resp) - 1 - s_http_resp_len;
+        int space = (int)sizeof(ctx->resp) - 1 - ctx->resp_len;
         if (copy > space) copy = space;
         if (copy > 0) {
-            memcpy(s_http_resp + s_http_resp_len, evt->data, (size_t)copy);
-            s_http_resp_len += copy;
+            memcpy(ctx->resp + ctx->resp_len, evt->data, (size_t)copy);
+            ctx->resp_len += copy;
         }
     }
     return ESP_OK;
@@ -613,16 +616,15 @@ static void llm_task(void *arg)
 
     ESP_LOGI(TAG, "LLM request: body_len=%d", (int)strlen(body));
 
-    /* Reset response buffer */
-    s_http_resp[0] = '\0';
-    s_http_resp_len = 0;
+    llm_ctx_t ctx = { .resp_len = 0 };
 
     esp_http_client_config_t cfg = {
-        .url        = "https://api.deepseek.com/v1/chat/completions",
-        .method     = HTTP_METHOD_POST,
+        .url           = "https://api.deepseek.com/v1/chat/completions",
+        .method        = HTTP_METHOD_POST,
         .event_handler = http_event_handler,
-        .timeout_ms = 25000,   /* 25s < 30s LLM timeout */
-        .buffer_size  = 1024,
+        .user_data     = &ctx,
+        .timeout_ms    = 25000,
+        .buffer_size   = 1024,
         .buffer_size_tx = 512,
     };
 
@@ -654,15 +656,13 @@ static void llm_task(void *arg)
 
     if (err == ESP_OK) {
         int status = esp_http_client_get_status_code(client);
-        ESP_LOGI(TAG, "LLM HTTP status=%d resp_len=%d", status, s_http_resp_len);
+        ESP_LOGI(TAG, "LLM HTTP status=%d resp_len=%d", status, ctx.resp_len);
 
-        if (status == 200 && s_http_resp_len > 0) {
-            s_http_resp[s_http_resp_len] = '\0';
+        if (status == 200 && ctx.resp_len > 0) {
+            ctx.resp[ctx.resp_len] = '\0';
 
-            /* Parse OpenAI-compatible response: choices[0].message.content
-             * Scope search to after "choices" to avoid matching wrong "content" */
             char parse_buf[AI_LLM_TEXT_LEN];
-            const char *choices = strstr(s_http_resp, "\"choices\"");
+            const char *choices = strstr(ctx.resp, "\"choices\"");
             const char *content = NULL;
             if (choices) {
                 const char *msg = strstr(choices, "\"message\"");
@@ -670,9 +670,8 @@ static void llm_task(void *arg)
                     content = json_get_str_in(msg, "content", parse_buf, sizeof(parse_buf));
                 }
             }
-            /* Fallback: try top-level content (shouldn't happen but defensive) */
             if (!content) {
-                content = json_get_str_in(s_http_resp, "content", parse_buf, sizeof(parse_buf));
+                content = json_get_str_in(ctx.resp, "content", parse_buf, sizeof(parse_buf));
             }
 
             if (content) {
