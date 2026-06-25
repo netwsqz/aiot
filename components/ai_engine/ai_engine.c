@@ -165,6 +165,9 @@ static char             s_llm_key[128];
 /* ── Abort flag — set by AiEngine_Abort(), checked by worker tasks ── */
 static volatile bool    s_abort_flag     = false;
 
+/* ── Base64 mutex — protects static b64/json buffers in ws_send_audio ── */
+static SemaphoreHandle_t s_b64_mtx = NULL;
+
 /* ================================================================ *
  * Base64 helper (mbedtls)                                           *
  * ================================================================ */
@@ -440,8 +443,7 @@ static esp_err_t ws_send_audio(const uint8_t *pcm, int pcm_len)
 
     /* base64: 3200 bytes → ~4270 chars. Use static buffer to avoid stack overflow. */
     static char s_audio_b64[5800];
-    static SemaphoreHandle_t s_b64_mtx = NULL;
-    if (!s_b64_mtx) s_b64_mtx = xSemaphoreCreateMutex();
+    if (!s_b64_mtx) return ESP_FAIL;
 
     xSemaphoreTake(s_b64_mtx, portMAX_DELAY);
 
@@ -965,6 +967,15 @@ esp_err_t AiEngine_Init(ai_state_cb_t      state_cb,
         return ESP_ERR_NO_MEM;
     }
 
+    s_b64_mtx = xSemaphoreCreateMutex();
+    if (!s_b64_mtx) {
+        vQueueDelete(s_ws_queue);
+        s_ws_queue = NULL;
+        vSemaphoreDelete(s_state_mtx);
+        s_state_mtx = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
     s_cb_state      = state_cb;
     s_cb_transcript = transcript_cb;
     s_cb_llm        = llm_cb;
@@ -1177,6 +1188,10 @@ void AiEngine_PrepareDeepSleep(void)
     if (s_ws_queue) {
         vQueueDelete(s_ws_queue);
         s_ws_queue = NULL;
+    }
+    if (s_b64_mtx) {
+        vSemaphoreDelete(s_b64_mtx);
+        s_b64_mtx = NULL;
     }
 
     ESP_LOGI(TAG, "Deep sleep prepare done");
