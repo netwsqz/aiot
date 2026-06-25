@@ -765,19 +765,19 @@ static void set_state(ai_state_t new_state)
 
 static void force_cleanup(void)
 {
-    /* Stop audio streaming task */
+    /* Caller holds s_state_mtx. This function releases it during delays
+     * to avoid blocking other threads, then reacquires before returning. */
+
     s_audio_task_running = false;
     s_abort_flag = true;
-    /* Give tasks a moment to notice abort */
-    vTaskDelay(pdMS_TO_TICKS(50));
 
-    /* Stop LLM task if running */
-    if (s_llm_task_handle) {
-        /* LLM task is self-deleting, just wait briefly */
-        vTaskDelay(pdMS_TO_TICKS(50));
-        s_llm_task_handle = NULL;
-    }
+    /* Release lock → let worker tasks notice abort and exit → reacquire */
+    xSemaphoreGive(s_state_mtx);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    xSemaphoreTake(s_state_mtx, portMAX_DELAY);
 
+    /* Defensive: audio task should have deinit'd itself (Task 5), but
+     * call again in case it didn't exit cleanly. */
     AudioBsp_DeinitRecord();
     ws_close();
 
@@ -1148,7 +1148,11 @@ void AiEngine_PrepareDeepSleep(void)
     /* Force cleanup regardless of state (spec §10) */
     s_abort_flag = true;
     s_audio_task_running = false;
-    vTaskDelay(pdMS_TO_TICKS(100));  /* Let tasks notice abort */
+
+    /* Release lock during delay so worker tasks can exit */
+    xSemaphoreGive(s_state_mtx);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    xSemaphoreTake(s_state_mtx, portMAX_DELAY);
 
     if (AudioBsp_IsRecording()) AudioBsp_DeinitRecord();
     ws_close();
