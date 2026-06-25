@@ -534,6 +534,8 @@ static void audio_stream_task(void *arg)
         /* ~100ms of audio per chunk, pace naturally */
     }
 
+    /* Deinit record device ourselves — avoids race with StopRecording */
+    AudioBsp_DeinitRecord();
     s_audio_task_running = false;
     ESP_LOGI(TAG, "Audio stream task done, sent %d bytes", total_sent);
     vTaskDelete(NULL);
@@ -842,9 +844,7 @@ void AiEngine_Tick(void)
     case AI_STATE_STREAMING: {
         if (s_state_ticks >= STREAMING_MAX_TICKS) {
             ESP_LOGI(TAG, "Streaming auto-stop at %d ticks", s_state_ticks);
-            /* Stop audio task */
             s_audio_task_running = false;
-            AudioBsp_DeinitRecord();
             ws_send_finish();
             set_state(AI_STATE_FINALIZING);
             break;
@@ -853,7 +853,6 @@ void AiEngine_Tick(void)
         /* Check if audio task died unexpectedly */
         if (!s_audio_task_running && s_state_ticks > 2) {
             ESP_LOGW(TAG, "Audio task died unexpectedly");
-            AudioBsp_DeinitRecord();
             ws_send_finish();
             set_state(AI_STATE_FINALIZING);
         }
@@ -1073,9 +1072,8 @@ esp_err_t AiEngine_StopRecording(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* Stop audio task */
+    /* Stop audio task — it will deinit record device on exit */
     s_audio_task_running = false;
-    AudioBsp_DeinitRecord();
     ws_send_finish();
     set_state(AI_STATE_FINALIZING);
 
