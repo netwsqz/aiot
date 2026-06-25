@@ -127,6 +127,12 @@ typedef struct {
     char data[WS_BUF_SIZE];
 } ws_event_msg_t;
 
+typedef struct {
+    bool asr_received;
+    char transcript[AI_USER_TEXT_LEN];
+    bool ws_error;
+} ws_consume_result_t;
+
 #define WS_QUEUE_DEPTH 8
 
 static QueueHandle_t s_ws_queue = NULL;
@@ -699,73 +705,44 @@ static void llm_task(void *arg)
 }
 
 /* ================================================================ *
- * WS event consumer — called inside Tick() with s_state_mtx held   *
+ * WS event consumer — dequeues from s_ws_queue, returns result struct *
  * ================================================================ */
 
-static void consume_ws_event(void)
+static ws_consume_result_t consume_ws_event(void)
 {
-    if (!s_ws_mtx) return;
+    ws_consume_result_t r = {0};
+    if (!s_ws_queue) return r;
 
-    /* Grab the event atomically */
-    ws_event_type_t evt;
-    char data_buf[WS_BUF_SIZE];
-    int  data_len = 0;
-
-    if (xSemaphoreTake(s_ws_mtx, 0) != pdTRUE) return;
-
-    evt      = s_ws_evt;
-    s_ws_evt = WS_EVT_NONE;
-
-    if (evt == WS_EVT_DATA) {
-        data_len = s_ws_data_len;
-        if (data_len > 0) {
-            memcpy(data_buf, s_ws_data_buf, (size_t)data_len);
-            data_buf[data_len] = '\0';
-        }
-        s_ws_data_len = 0;
-    }
-    xSemaphoreGive(s_ws_mtx);
-
-    /* Process outside the lock */
-    char parse_buf[512];
-    switch (evt) {
-    case WS_EVT_CONNECTED:
-        ws_send_session_config();
-        break;
-
-    case WS_EVT_DATA:
-        /* Parse for transcription completion (spec §3.2) */
-        if (strstr(data_buf, "conversation.item.input_audio_transcription.completed")) {
-            const char *transcript = json_get_str_in(data_buf, "transcript",
-                                                     parse_buf, sizeof(parse_buf));
-            if (transcript) {
-                xSemaphoreTake(s_state_mtx, portMAX_DELAY);
-                strncpy(s_asr_transcript, transcript, AI_USER_TEXT_LEN - 1);
-                s_asr_transcript[AI_USER_TEXT_LEN - 1] = '\0';
-                s_asr_received = true;
-                ESP_LOGI(TAG, "ASR final: %s", s_asr_transcript);
-                if (s_cb_transcript) s_cb_transcript(s_asr_transcript, true);
-                xSemaphoreGive(s_state_mtx);
+    ws_event_msg_t msg;
+    while (xQueueReceive(s_ws_queue, &msg, 0) == pdTRUE) {
+        switch (msg.type) {
+        case WS_EVT_CONNECTED:
+            ws_send_session_config();
+            break;
+        case WS_EVT_DATA:
+            /* Final transcription */
+            if (strstr(msg.data, "transcription.completed")) {
+                json_get_str_in(msg.data, "transcript",
+                                r.transcript, sizeof(r.transcript));
+                r.asr_received = true;
             }
-        }
-        /* Partial transcription — debug only (spec §3.2) */
-        if (strstr(data_buf, "input_audio_transcription.partial")) {
-            const char *partial = json_get_str_in(data_buf, "transcript",
-                                                  parse_buf, sizeof(parse_buf));
-            if (partial && s_cb_transcript) {
-                s_cb_transcript(partial, false);
+            /* Partial — debug log only */
+            if (strstr(msg.data, "transcription.partial")) {
+                char tmp[128];
+                if (json_get_str_in(msg.data, "transcript", tmp, sizeof(tmp))) {
+                    ESP_LOGD(TAG, "ASR partial: %s", tmp);
+                }
             }
+            break;
+        case WS_EVT_DISCONNECTED:
+        case WS_EVT_ERROR:
+            r.ws_error = true;
+            break;
+        default:
+            break;
         }
-        break;
-
-    case WS_EVT_DISCONNECTED:
-    case WS_EVT_ERROR:
-        s_ws_connected = false;
-        break;
-
-    default:
-        break;
     }
+    return r;
 }
 
 /* ================================================================ *
@@ -826,8 +803,18 @@ void AiEngine_Tick(void)
     s_state_ticks++;
     if (s_state != AI_STATE_IDLE) s_session_ticks++;
 
-    /* ── Consume WS events first ──────────────────────── */
-    consume_ws_event();
+    /* ── Consume WS events ─────────────────────── */
+    ws_consume_result_t wr = consume_ws_event();
+    if (wr.asr_received) {
+        strncpy(s_asr_transcript, wr.transcript, AI_USER_TEXT_LEN - 1);
+        s_asr_transcript[AI_USER_TEXT_LEN - 1] = '\0';
+        s_asr_received = true;
+        ESP_LOGI(TAG, "ASR final: %s", s_asr_transcript);
+        if (s_cb_transcript) s_cb_transcript(s_asr_transcript, true);
+    }
+    if (wr.ws_error) {
+        s_ws_connected = false;
+    }
 
     /* ── WiFi guard (spec §3.5) ──────────────────────── */
     if (s_state != AI_STATE_IDLE && !WifiBsp_IsConnected()) {
