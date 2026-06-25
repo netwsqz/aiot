@@ -196,6 +196,62 @@ static void setup_bottom_right(lv_ui *ui)
     lv_obj_set_style_radius(ui->bar_timer_mini, 0, LV_PART_INDICATOR);
 
     lv_obj_add_flag(ui->cont_timer_mini, LV_OBJ_FLAG_HIDDEN);
+
+    /* AI conversation entry — hidden by default, shown by ui_update_ai_entry() */
+    ui->cont_ai = lv_obj_create(ui->cont_bottom_right);
+    lv_obj_set_size(ui->cont_ai, 100, 100);
+    lv_obj_set_pos(ui->cont_ai, 0, 0);
+    lv_obj_set_style_bg_opa(ui->cont_ai, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ui->cont_ai, 0, 0);
+    lv_obj_set_style_pad_all(ui->cont_ai, 0, 0);
+    lv_obj_set_style_radius(ui->cont_ai, 0, 0);
+    lv_obj_set_scrollbar_mode(ui->cont_ai, LV_SCROLLBAR_MODE_OFF);
+
+    /* Mic icon (centered) */
+    ui->lbl_ai_mic = lv_label_create(ui->cont_ai);
+    lv_obj_set_pos(ui->lbl_ai_mic, 0, 30);
+    lv_obj_set_size(ui->lbl_ai_mic, 100, 24);
+    lv_label_set_text(ui->lbl_ai_mic, LV_SYMBOL_AUDIO);
+    lv_obj_set_style_text_font(ui->lbl_ai_mic, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(ui->lbl_ai_mic, lv_color_black(), 0);
+    lv_obj_set_style_text_align(ui->lbl_ai_mic, LV_TEXT_ALIGN_CENTER, 0);
+
+    /* Status text (below mic) */
+    ui->lbl_ai_status = lv_label_create(ui->cont_ai);
+    lv_obj_set_pos(ui->lbl_ai_status, 0, 58);
+    lv_obj_set_size(ui->lbl_ai_status, 100, 14);
+    lv_label_set_text(ui->lbl_ai_status, "");
+    lv_obj_set_style_text_font(ui->lbl_ai_status, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(ui->lbl_ai_status, lv_color_black(), 0);
+    lv_obj_set_style_text_align(ui->lbl_ai_status, LV_TEXT_ALIGN_CENTER, 0);
+
+    /* Result text (hidden, shown when displaying LLM reply) */
+    ui->lbl_ai_text = lv_label_create(ui->cont_ai);
+    lv_obj_set_pos(ui->lbl_ai_text, 2, 4);
+    lv_obj_set_size(ui->lbl_ai_text, 96, 92);
+    lv_label_set_text(ui->lbl_ai_text, "");
+    lv_label_set_long_mode(ui->lbl_ai_text, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(ui->lbl_ai_text, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(ui->lbl_ai_text, lv_color_black(), 0);
+    lv_obj_set_style_text_align(ui->lbl_ai_text, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_add_flag(ui->lbl_ai_text, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_add_flag(ui->cont_ai, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* ── Public: AI entry show/hide (mutually exclusive with timer/placeholder) ── */
+void ui_update_ai_entry(bool show)
+{
+    /* AI 优先策略：cont_ai 始终可见，番茄钟 mini 和 placeholder 永久隐藏 */
+    lv_obj_clear_flag(ui.cont_ai, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui.lbl_image_placeholder, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui.cont_timer_mini, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* ── Public: instance accessor for ai_ui.c ── */
+lv_ui *ui_get_instance(void)
+{
+    return &ui;
 }
 
 /* ── Public API ────────────────────────────────────── */

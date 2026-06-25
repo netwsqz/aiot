@@ -22,6 +22,9 @@
 #include "timer_engine.h"
 #include "timer_ui.h"
 #include "standby_screen.h"
+#include "ai_engine.h"
+#include "ai_ui.h"
+#include "audio_bsp.h"
 #include "esp_sleep.h"
 #include "driver/rtc_io.h"
 #include "nvs_flash.h"
@@ -97,7 +100,27 @@ static void timer_fired_cb(const timer_instance_t *t)
     TimerUi_PushFiredEvent(t->id, t->kind, t->total_seconds);
 }
 
-/* BOOT key long-press detection */
+/* ── AI engine callbacks (run inside Lvgl_Lock via data_task) ── */
+static void ai_state_cb(ai_state_t state)
+{
+    /* AI entry always visible; just update state icon/text */
+    AiUi_UpdateState(state, NULL, NULL);
+}
+
+static void ai_llm_result_cb(const char *reply)
+{
+    AiUi_UpdateState(AI_STATE_DISPLAYING, NULL, reply);
+}
+
+static void ai_transcript_cb(const char *text, bool is_final)
+{
+    (void)is_final;
+    if (text) {
+        AiUi_UpdateState(AiEngine_GetState(), text, NULL);
+    }
+}
+
+/* BOOT key: long-press → AP toggle (existing), short-press → AI toggle (new). */
 static void boot_key_task(void *arg)
 {
     TickType_t press_start = 0;
@@ -128,6 +151,21 @@ static void boot_key_task(void *arg)
                 vTaskDelay(pdMS_TO_TICKS(500));  // Debounce
             }
         } else {
+            /* Released — detect short press (< 500 ms) for AI toggle. */
+            if (press_start != 0) {
+                TickType_t held = xTaskGetTickCount() - press_start;
+                if (held > pdMS_TO_TICKS(30) && held < pdMS_TO_TICKS(500)) {
+                    ESP_LOGI(TAG, "BOOT short press → AI toggle");
+                    if (AiEngine_GetState() == AI_STATE_IDLE) {
+                        AiEngine_StartRecording();
+                    } else if (AiEngine_GetState() == AI_STATE_STREAMING) {
+                        AiEngine_StopRecording();
+                    } else {
+                        /* In FINALIZING/WAITING_LLM/DISPLAYING: abort to IDLE. */
+                        AiEngine_Abort();
+                    }
+                }
+            }
             press_start = 0;
         }
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -165,6 +203,13 @@ static void pwr_key_task(void *arg)
 static void enter_deep_sleep(void)
 {
     ESP_LOGI(TAG, "Preparing deep sleep...");
+
+    /* 0. Force AI engine to IDLE first — closes WS, deinits record,
+     *    avoids dangling network sockets / tasks during teardown. */
+    if (AiEngine_IsActive()) {
+        ESP_LOGW(TAG, "AI engine active (state=%d) — forcing shutdown", AiEngine_GetState());
+    }
+    AiEngine_PrepareDeepSleep();
 
     /* 1. Delete application tasks FIRST — data_task may hold LVGL/I2C.
      *    Must be gone before we touch LVGL or I2C. */
@@ -298,6 +343,9 @@ static void data_task(void *arg)
                 ui_update_timer_mini(true, pomo->remaining_sec, pomo->total_seconds);
             else
                 ui_update_timer_mini(false, 0, 0);
+            /* Drive AI engine state machine (1 s tick). Callbacks run
+             * inside this lock and touch LVGL safely. */
+            AiEngine_Tick();
             Lvgl_Unlock();
         }
 
@@ -406,6 +454,23 @@ extern "C" void app_main(void)
             Lvgl_Unlock();
         }
         TimerEngine_SetFiredCallback(timer_fired_cb);
+
+        /* AI engine + UI re-init on wakeup */
+        /* Probe audio hardware — verifies codec/I2S after deep sleep */
+        if (AudioBsp_InitRecord() == ESP_OK) {
+            AudioBsp_DeinitRecord();
+            ESP_LOGI(TAG, "AudioBsp probed OK (wakeup)");
+        } else {
+            ESP_LOGW(TAG, "AudioBsp probe failed (wakeup) — AI voice will not work");
+        }
+
+        AiEngine_Init(ai_state_cb, ai_transcript_cb, ai_llm_result_cb);
+        if (Lvgl_Lock(-1)) {
+            AiUi_Init();
+            AiUi_ShowEntry(true);  /* Show mic icon on dashboard */
+            Lvgl_Unlock();
+        }
+        ESP_LOGI(TAG, "AI engine + UI re-init done");
 
         /* TODO Manager + UI */
         TodoMgr_Init();
@@ -524,6 +589,26 @@ extern "C" void app_main(void)
 
     TimerEngine_SetFiredCallback(timer_fired_cb);
     ESP_LOGI(TAG, "Timer fired callback registered");
+
+    /* AI engine + UI — must init before data_task starts so the first
+     * AiEngine_Tick() call inside data_task sees a valid state machine.
+     * Order: AudioBsp first (codec/I2S), then AiEngine (NVS+WS), then AiUi (LVGL widgets). */
+    if (AudioBsp_InitRecord() == ESP_OK) {
+        AudioBsp_DeinitRecord();  /* Close — only open when actually streaming */
+        ESP_LOGI(TAG, "AudioBsp probed OK");
+    } else {
+        ESP_LOGW(TAG, "AudioBsp init failed — AI voice will not work");
+    }
+    if (AiEngine_Init(ai_state_cb, ai_transcript_cb, ai_llm_result_cb) != ESP_OK) {
+        ESP_LOGE(TAG, "AiEngine init FAILED");
+    } else {
+        ESP_LOGI(TAG, "AI engine init done");
+    }
+    if (Lvgl_Lock(-1)) {
+        AiUi_Init();
+        AiUi_ShowEntry(true);  /* Show mic icon on dashboard */
+        Lvgl_Unlock();
+    }
 
     /* 12. TODO Manager */
     TodoMgr_Init();
