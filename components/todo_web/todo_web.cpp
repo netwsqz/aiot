@@ -2,6 +2,10 @@
 #include "todo_manager.h"
 #include "standby_screen.h"
 #include "wifi_bsp.h"
+#include "weather_fetch.h"
+#include "weather_cache.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 #include <cstring>
 #include <esp_http_server.h>
 #include <esp_log.h>
@@ -23,7 +27,20 @@ static esp_err_t send_json(httpd_req_t *req, cJSON *json, int status_code)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_status(req, status_code == 200 ? "200 OK" : "400 Bad Request");
+
+    /* Map numeric status codes to HTTP status lines. Earlier code collapsed
+     * every non-200 to "400 Bad Request", so 404/500 responses carried the
+     * wrong status line and clients couldn't distinguish missing resources
+     * from malformed requests. */
+    const char *status_line;
+    switch (status_code) {
+        case 200: status_line = "200 OK"; break;
+        case 400: status_line = "400 Bad Request"; break;
+        case 404: status_line = "404 Not Found"; break;
+        case 500: status_line = "500 Internal Server Error"; break;
+        default:  status_line = (status_code >= 500) ? "500 Internal Server Error" : "400 Bad Request"; break;
+    }
+    httpd_resp_set_status(req, status_line);
     httpd_resp_send(req, str, strlen(str));
     free(str);
     return ESP_OK;
@@ -142,9 +159,19 @@ static esp_err_t handle_create_list(httpd_req_t *req)
         cJSON_Delete(body);
         return send_error(req, "Missing name", 400);
     }
+    /* Boundary validation: TodoMgr truncates with strncpy, but a too-long
+     * name would be silently cut (possibly mid-UTF-8). Reject up-front. */
+    if (strlen(jname->valuestring) > TODO_NAME_LEN - 1) {
+        cJSON_Delete(body);
+        return send_error(req, "name too long", 400);
+    }
 
     cJSON *jicon = cJSON_GetObjectItem(body, "icon");
     const char *icon = (jicon && jicon->valuestring) ? jicon->valuestring : "[]";
+    if (strlen(icon) > TODO_ICON_LEN - 1) {
+        cJSON_Delete(body);
+        return send_error(req, "icon too long", 400);
+    }
 
     char id[TODO_ID_LEN];
     esp_err_t err = TodoMgr_CreateList(jname->valuestring, icon, id);
@@ -176,6 +203,14 @@ static esp_err_t handle_update_list(httpd_req_t *req)
 
     const char *name = (jname && jname->valuestring) ? jname->valuestring : NULL;
     const char *icon = (jicon && jicon->valuestring) ? jicon->valuestring : NULL;
+    if (name && strlen(name) > TODO_NAME_LEN - 1) {
+        cJSON_Delete(body);
+        return send_error(req, "name too long", 400);
+    }
+    if (icon && strlen(icon) > TODO_ICON_LEN - 1) {
+        cJSON_Delete(body);
+        return send_error(req, "icon too long", 400);
+    }
     uint8_t *order_ptr = NULL;
     uint8_t order_val = 0;
     if (jorder) {
@@ -243,12 +278,20 @@ static esp_err_t handle_create_task(httpd_req_t *req, const char *list_id)
         cJSON_Delete(body);
         return send_error(req, "Missing text", 400);
     }
+    if (strlen(jtext->valuestring) > TODO_TEXT_LEN - 1) {
+        cJSON_Delete(body);
+        return send_error(req, "text too long", 400);
+    }
 
     cJSON *jpri = cJSON_GetObjectItem(body, "priority");
     cJSON *jdue = cJSON_GetObjectItem(body, "due");
 
     uint8_t priority = (jpri) ? (uint8_t)jpri->valueint : 0;
     const char *due = (jdue && jdue->valuestring) ? jdue->valuestring : NULL;
+    if (due && strlen(due) > TODO_DATE_LEN - 1) {
+        cJSON_Delete(body);
+        return send_error(req, "due too long", 400);
+    }
 
     char task_id[TODO_ID_LEN];
     esp_err_t err = TodoMgr_CreateTask(list_id, jtext->valuestring, priority, due, task_id);
@@ -296,6 +339,10 @@ static esp_err_t handle_update_task(httpd_req_t *req)
     }
 
     const char *due = (jdue && jdue->valuestring) ? jdue->valuestring : NULL;
+    if (due && strlen(due) > TODO_DATE_LEN - 1) {
+        cJSON_Delete(body);
+        return send_error(req, "due too long", 400);
+    }
 
     esp_err_t err = TodoMgr_UpdateTask(id, done_ptr, pri_ptr, due);
     cJSON_Delete(body);
@@ -335,6 +382,11 @@ static esp_err_t handle_delete_standby(httpd_req_t *req);
 /* ── WiFi config handlers (forward-declared for dispatcher) ── */
 static esp_err_t handle_get_wifi(httpd_req_t *req);
 static esp_err_t handle_post_wifi(httpd_req_t *req);
+
+/* ── Weather config handlers (forward-declared for dispatcher) ── */
+static esp_err_t handle_get_weather(httpd_req_t *req);
+static esp_err_t handle_post_weather(httpd_req_t *req);
+static esp_err_t handle_refresh_weather(httpd_req_t *req);
 
 /* ── Main dispatcher: single catch-all for all API routes ── */
 static esp_err_t api_dispatcher(httpd_req_t *req)
@@ -395,6 +447,20 @@ static esp_err_t api_dispatcher(httpd_req_t *req)
     if (strcmp(uri, "/api/wifi") == 0) {
         if (method == HTTP_GET)  return handle_get_wifi(req);
         if (method == HTTP_POST) return handle_post_wifi(req);
+    }
+
+    /* ── Weather config API ── */
+    if (strcmp(uri, "/api/weather/config") == 0) {
+        if (method == HTTP_GET)  return handle_get_weather(req);
+        if (method == HTTP_POST) return handle_post_weather(req);
+    }
+
+    /* ── Weather manual refresh ──
+     * Asks data_task to fetch immediately (next 1s tick). Returns ok
+     * without waiting — caller polls /api/weather/config or watches the
+     * screen. Does nothing if WiFi is down or config is incomplete. */
+    if (method == HTTP_POST && strcmp(uri, "/api/weather/refresh") == 0) {
+        return handle_refresh_weather(req);
     }
 
     /* OPTIONS — CORS preflight for any /api/ route */
@@ -510,9 +576,30 @@ static esp_err_t handle_post_wifi(httpd_req_t *req)
         cJSON_Delete(body);
         return send_error(req, "Missing SSID", 400);
     }
+    /* Validate SSID/password length against wifi_config_t field sizes.
+     * wifi_config_t.sta.ssid is 32 bytes total (incl. NUL) → 31 usable chars;
+     * .password is 64 bytes total → 63 usable chars. Reject up-front so
+     * oversized values aren't stored in NVS and then silently fail to load
+     * back into the smaller stack buffers in WifiBsp_Reconnect(). */
+    if (strlen(jssid->valuestring) > 31) {
+        cJSON_Delete(body);
+        return send_error(req, "SSID too long (max 31 chars)", 400);
+    }
 
     cJSON *jpass = cJSON_GetObjectItem(body, "password");
     const char *password = (jpass && jpass->valuestring) ? jpass->valuestring : "";
+    if (strlen(password) > 63) {
+        cJSON_Delete(body);
+        return send_error(req, "Password too long (max 63 chars)", 400);
+    }
+
+    /* Snapshot the SSID into a local buffer BEFORE cJSON_Delete(body) frees
+     * jssid->valuestring. The earlier code kept a raw pointer into the cJSON
+     * tree and used it after free (use-after-free) when building the
+     * success response below. wifi_config_t.sta.ssid fits 31 chars + NUL. */
+    char echo_ssid[32];
+    strncpy(echo_ssid, jssid->valuestring, sizeof(echo_ssid) - 1);
+    echo_ssid[sizeof(echo_ssid) - 1] = '\0';
 
     esp_err_t err = WifiBsp_SetCredentials(jssid->valuestring, password);
     if (err != ESP_OK) {
@@ -527,9 +614,143 @@ static esp_err_t handle_post_wifi(httpd_req_t *req)
     if (err != ESP_OK) return send_error(req, "Reconnect failed", 500);
 
     cJSON *data = cJSON_CreateObject();
-    cJSON_AddStringToObject(data, "ssid", jssid->valuestring);
+    cJSON_AddStringToObject(data, "ssid", echo_ssid);
     cJSON_AddBoolToObject(data, "reconnecting", true);
     return send_ok(req, data);
+}
+
+/* ── Weather config handlers ─────────────────────────── */
+
+/* Read a config field from NVS namespace "weather", falling back to the
+ * Kconfig default if not stored. Writes a NUL-terminated copy into out. */
+static void read_weather_field(const char *key, const char *kconfig_default,
+                               char *out, size_t out_size)
+{
+    nvs_handle_t h;
+    if (nvs_open("weather", NVS_READONLY, &h) == ESP_OK) {
+        size_t len = out_size;
+        if (nvs_get_str(h, key, out, &len) == ESP_OK) {
+            nvs_close(h);
+            return;
+        }
+        nvs_close(h);
+    }
+    strncpy(out, kconfig_default ? kconfig_default : "", out_size - 1);
+    out[out_size - 1] = '\0';
+}
+
+/* Mask an API key: keep last 4 chars, prefix with asterisks. */
+static void mask_api_key(const char *key, char *out, size_t out_size)
+{
+    size_t len = key ? strlen(key) : 0;
+    if (len == 0) { if (out_size) out[0] = '\0'; return; }
+    if (len <= 4) {
+        strncpy(out, key, out_size - 1);
+        out[out_size - 1] = '\0';
+        return;
+    }
+    size_t stars = len - 4;
+    if (stars > out_size - 5) stars = out_size - 5;  /* leave room for last 4 + NUL */
+    memset(out, '*', stars);
+    strncpy(out + stars, key + len - 4, 4);
+    out[stars + 4] = '\0';
+}
+
+/* GET /api/weather/config — return masked key + location + city (from NVS). */
+static esp_err_t handle_get_weather(httpd_req_t *req)
+{
+    char api_key[64];
+    char location_id[32];
+    char city_name[32];
+    char base_url[64];
+    char masked[40];
+
+    read_weather_field("api_key", CONFIG_WEATHER_API_KEY, api_key, sizeof(api_key));
+    read_weather_field("location_id", CONFIG_WEATHER_LOCATION_ID, location_id, sizeof(location_id));
+    read_weather_field("city_name", CONFIG_WEATHER_CITY_NAME, city_name, sizeof(city_name));
+    read_weather_field("base_url", CONFIG_WEATHER_API_BASE_URL, base_url, sizeof(base_url));
+
+    mask_api_key(api_key, masked, sizeof(masked));
+
+    cJSON *data = cJSON_CreateObject();
+    cJSON_AddStringToObject(data, "api_key_masked", masked);
+    cJSON_AddStringToObject(data, "location_id", location_id);
+    cJSON_AddStringToObject(data, "city_name", city_name);
+    cJSON_AddStringToObject(data, "base_url", base_url);
+    return send_ok(req, data);
+}
+
+/* POST /api/weather/config — validate + write to NVS, then clear cache. */
+static esp_err_t handle_post_weather(httpd_req_t *req)
+{
+    cJSON *body = parse_body(req);
+    if (!body) return send_error(req, "Invalid JSON", 400);
+
+    cJSON *jkey = cJSON_GetObjectItem(body, "api_key");
+    cJSON *jloc = cJSON_GetObjectItem(body, "location_id");
+    cJSON *jcity = cJSON_GetObjectItem(body, "city_name");
+
+    if (!cJSON_IsString(jkey) || jkey->valuestring[0] == '\0') {
+        cJSON_Delete(body); return send_error(req, "Missing api_key", 400);
+    }
+    if (!cJSON_IsString(jloc) || jloc->valuestring[0] == '\0') {
+        cJSON_Delete(body); return send_error(req, "Missing location_id", 400);
+    }
+    if (!cJSON_IsString(jcity) || jcity->valuestring[0] == '\0') {
+        cJSON_Delete(body); return send_error(req, "Missing city_name", 400);
+    }
+    if (strlen(jcity->valuestring) > WEATHER_CITY_NAME_LEN - 1) {
+        cJSON_Delete(body); return send_error(req, "city_name too long", 400);
+    }
+    if (strlen(jkey->valuestring) > WEATHER_API_KEY_LEN - 1) {
+        cJSON_Delete(body); return send_error(req, "api_key too long", 400);
+    }
+    if (strlen(jloc->valuestring) > WEATHER_LOCATION_ID_LEN - 1) {
+        cJSON_Delete(body); return send_error(req, "location_id too long", 400);
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("weather", NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        cJSON_Delete(body);
+        return send_error(req, "NVS open failed", 500);
+    }
+    nvs_set_str(handle, "api_key", jkey->valuestring);
+    nvs_set_str(handle, "location_id", jloc->valuestring);
+    nvs_set_str(handle, "city_name", jcity->valuestring);
+    /* Optional base_url override (QWeather per-developer API host). If the
+     * client omits it we don't touch the stored value, so the field acts as
+     * a partial update. WeatherFetch's s_base_url buffer is 64 bytes. */
+    cJSON *jbase = cJSON_GetObjectItem(body, "base_url");
+    if (cJSON_IsString(jbase) && jbase->valuestring[0] != '\0' &&
+        strlen(jbase->valuestring) < 64) {
+        nvs_set_str(handle, "base_url", jbase->valuestring);
+    }
+    nvs_commit(handle);
+    nvs_close(handle);
+
+    /* Reload live config so the new key/city/host takes effect immediately —
+     * previously WeatherFetch kept stale buffers until reboot. */
+    WeatherFetch_ReloadConfig();
+
+    /* Clear stale weather cache so the old city's data is not shown. */
+    WeatherCache_Clear();
+
+    ESP_LOGI(TAG, "Weather config updated: city=%s location=%s",
+             jcity->valuestring, jloc->valuestring);
+    cJSON_Delete(body);
+    return send_ok(req, NULL);
+}
+
+/* POST /api/weather/refresh — trigger an immediate fetch (async). */
+static esp_err_t handle_refresh_weather(httpd_req_t *req)
+{
+    if (!WifiBsp_IsConnected()) {
+        return send_error(req, "WiFi not connected", 400);
+    }
+    WeatherFetch_RequestRefresh();
+    ESP_LOGI(TAG, "Weather refresh requested");
+    return send_ok(req, NULL);
 }
 
 esp_err_t TodoWeb_Init(void)
@@ -545,7 +766,9 @@ esp_err_t TodoWeb_Start(void)
     if (s_server) return ESP_OK;
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 6;
+    config.max_uri_handlers = 8;  /* 6 used (root + GET/POST/PUT/DELETE/OPTIONS
+                                   * catch-all); leave headroom for future
+                                   * handlers so registration doesn't fail. */
     config.stack_size = 8192;
     config.uri_match_fn = httpd_uri_match_wildcard;
 
