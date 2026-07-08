@@ -117,7 +117,10 @@ static ai_llm_result_cb_t s_cb_llm       = NULL;
 
 /* ── WebSocket ────────────────────────────────────────────────────── */
 static esp_websocket_client_handle_t s_ws      = NULL;
-static bool                      s_ws_connected  = false;
+/* s_ws_connected is written from the ws client task and read from
+ * audio_stream_task / Tick without a lock. Mark volatile so the read sites
+ * don't cache a stale value across the dual cores. */
+static volatile bool                      s_ws_connected  = false;
 static bool                      s_ws_config_sent = false;
 
 /* WS event message — enqueued by ws_event_handler, dequeued by consume_ws_event */
@@ -197,8 +200,21 @@ static const char *json_get_str_in(const char *json, const char *key,
     const char *start = strstr(json, search);
     if (!start) return NULL;
     start += strlen(search);
-    const char *end = strchr(start, '"');
-    if (!end) return NULL;
+    /* Walk to the closing quote, honoring backslash escapes so a value
+     * containing \" doesn't terminate early. (We copy the raw escaped
+     * form; unescaping is left to the consumer — for ASR transcripts the
+     * common case is no escapes, and this at least stops premature
+     * truncation.) */
+    const char *end = start;
+    while (*end) {
+        if (*end == '\\' && end[1]) {
+            end += 2;
+            continue;
+        }
+        if (*end == '"') break;
+        end++;
+    }
+    if (*end != '"') return NULL;
     size_t len = (size_t)(end - start);
     if (len >= buf_size) len = buf_size - 1;
     memcpy(buf, start, len);
@@ -218,6 +234,15 @@ static int json_escape(const char *src, char *dst, size_t dst_size)
     for (size_t i = 0; src[i] && j + 2 < dst_size; i++) {
         if (src[i] == '"' || src[i] == '\\') {
             dst[j++] = '\\';
+        } else if (src[i] == '\n') {
+            dst[j++] = '\\'; dst[j++] = 'n';
+            continue;
+        } else if (src[i] == '\r') {
+            dst[j++] = '\\'; dst[j++] = 'r';
+            continue;
+        } else if (src[i] == '\t') {
+            dst[j++] = '\\'; dst[j++] = 't';
+            continue;
         }
         dst[j++] = src[i];
     }
@@ -307,7 +332,7 @@ static void ws_event_handler(void *arg, esp_event_base_t base,
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "WS connected");
-        s_ws_connected = true;
+        s_ws_connected = true;   /* volatile bool — see declaration */
         msg.type = WS_EVT_CONNECTED;
         break;
 
@@ -380,8 +405,11 @@ static esp_err_t ws_connect(void)
         "?model=qwen3-asr-flash-realtime";
 
     /* Build auth header — config.headers is a single string with
-     * each header line terminated by \r\n. */
-    char auth_header[160];
+     * each header line terminated by \r\n. Use static storage so the
+     * pointer stays valid for the lifetime of the ws client (which
+     * reconnects asynchronously from its own task); a stack buffer
+     * would dangle after ws_connect returns. */
+    static char auth_header[160];
     snprintf(auth_header, sizeof(auth_header),
              "Authorization: Bearer %s\r\n", s_asr_key);
 
@@ -459,12 +487,18 @@ static esp_err_t ws_send_audio(const uint8_t *pcm, int pcm_len)
     int n = snprintf(s_audio_json, sizeof(s_audio_json),
                      "{\"type\":\"input_audio_buffer.append\",\"audio\":\"%s\"}",
                      s_audio_b64);
+
+    /* Keep s_b64_mtx held across the WS send: s_audio_json is a shared static
+     * buffer, and a second audio chunk entering ws_send_audio before this
+     * send completes would overwrite it mid-transmit. (Previously the mutex
+     * was released right here, racing the send.) */
+    if (n < (int)sizeof(s_audio_json)) {
+        int sent = esp_websocket_client_send_text(s_ws, s_audio_json, n, portMAX_DELAY);
+        xSemaphoreGive(s_b64_mtx);
+        return (sent > 0) ? ESP_OK : ESP_FAIL;
+    }
     xSemaphoreGive(s_b64_mtx);
-
-    if (n >= (int)sizeof(s_audio_json)) return ESP_FAIL;
-
-    int sent = esp_websocket_client_send_text(s_ws, s_audio_json, n, portMAX_DELAY);
-    return (sent > 0) ? ESP_OK : ESP_FAIL;
+    return ESP_FAIL;
 }
 
 /*
@@ -510,6 +544,9 @@ static void audio_stream_task(void *arg)
     int total_sent = 0;
 
     ESP_LOGI(TAG, "Audio stream task started");
+    /* s_audio_task_running is set by StartRecording before xTaskCreate to
+     * close the false-positive window; keep this assignment for the case
+     * where the task is spawned by any other path. */
     s_audio_task_running = true;
 
     while (s_audio_task_running && !s_abort_flag) {
@@ -606,7 +643,12 @@ static void llm_task(void *arg)
                 ",{\"role\":\"assistant\",\"content\":\"%s\"}",
                 esc_buf, esc_llm);
             if (pos + n < (int)sizeof(body)) pos += n;
-            else break;  /* body full, stop adding history */
+            else {
+                /* body full — close the messages array + object so the
+                 * request stays valid JSON instead of shipping a truncated
+                 * body that DeepSeek rejects with a parse error. */
+                break;
+            }
         }
     }
 
@@ -616,7 +658,15 @@ static void llm_task(void *arg)
         ",{\"role\":\"user\",\"content\":\"%s\"}", esc_buf);
     if (pos + n < (int)sizeof(body)) pos += n;
 
-    snprintf(body + pos, sizeof(body) - (size_t)pos, "]}");
+    /* Final close. Even if the body was truncated above, this produces
+     * valid JSON: "...messages":[{...},{...}]} */
+    if ((size_t)pos < sizeof(body) - 2) {
+        body[pos++] = ']';
+        body[pos++] = '}';
+        body[pos] = '\0';
+    } else {
+        body[sizeof(body) - 1] = '\0';
+    }
 
     ESP_LOGI(TAG, "LLM request: body_len=%d", (int)strlen(body));
 
@@ -653,6 +703,10 @@ static void llm_task(void *arg)
     if (s_abort_flag) {
         ESP_LOGI(TAG, "LLM task aborted");
         esp_http_client_cleanup(client);
+        /* Signal completion so Tick doesn't wait the full LLM_TIMEOUT
+         * (30s) for a task that already exited. */
+        snprintf(s_llm_reply, sizeof(s_llm_reply), "[AI已取消]");
+        s_llm_received = true;
         s_llm_task_running = false;
         vTaskDelete(NULL);
         return;
@@ -890,13 +944,6 @@ void AiEngine_Tick(void)
      * WAITING_LLM: launch LLM task on tick 1, then poll result.   *
      * =========================================================== */
     case AI_STATE_WAITING_LLM: {
-        if (s_llm_received) {
-            history_push(s_asr_transcript, s_llm_reply);
-            if (s_cb_llm) s_cb_llm(s_llm_reply);
-            set_state(AI_STATE_DISPLAYING);
-            break;
-        }
-
         /* Launch LLM task on first tick in this state */
         if (!s_llm_started) {
             s_llm_started = true;
@@ -918,9 +965,16 @@ void AiEngine_Tick(void)
             s_llm_received = true;
         }
 
+        /* Consume the result exactly once: the early `if (s_llm_received)`
+         * branch above plus this one used to both call history_push /
+         * s_cb_llm, which double-pushed history and double-fired the
+         * callback. Gate the second push behind a flag we clear here. */
         if (s_llm_received) {
             history_push(s_asr_transcript, s_llm_reply);
             if (s_cb_llm) s_cb_llm(s_llm_reply);
+            /* Clear so the next state entry doesn't re-push. force_cleanup
+             * on the DISPLAYING→IDLE transition resets it formally. */
+            s_llm_received = false;
             set_state(AI_STATE_DISPLAYING);
         }
         break;
@@ -1054,11 +1108,17 @@ esp_err_t AiEngine_StartRecording(void)
     set_state(AI_STATE_STREAMING);
 
     /* Launch audio streaming task — it will wait for WS connected + config sent */
+    /* Set the running flag BEFORE xTaskCreate so Tick's "audio task died"
+     * guard (which checks s_audio_task_running after s_state_ticks > 2) can't
+     * false-positive if scheduling is delayed. The task itself used to set
+     * this on entry, leaving a window where Tick thought it had died. */
+    s_audio_task_running = true;
     BaseType_t ret = xTaskCreate(audio_stream_task, "ai_audio",
                                  AUDIO_STREAM_TASK_STACK, NULL, 5,
                                  &s_audio_task_handle);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create audio stream task");
+        s_audio_task_running = false;
         AudioBsp_DeinitRecord();
         ws_close();
         set_state(AI_STATE_IDLE);
