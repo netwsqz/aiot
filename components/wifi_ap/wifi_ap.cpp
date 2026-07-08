@@ -15,6 +15,10 @@ static wifi_ap_state_cb_t s_state_cb = NULL;
 static esp_timer_handle_t s_timeout_timer = NULL;
 static esp_netif_t *s_ap_netif = NULL;
 static bool s_initialized = false;
+/* 当前关联到 AP 热点的站点数（由 STACONNECTED/STADISCONNECTED 事件维护）。
+ * 用原子化的 std::atomic 在事件回调（事件循环 task）与查询（data_task / UI）间安全共享。 */
+#include <atomic>
+static std::atomic<int> s_sta_count{0};
 
 static void timeout_timer_cb(void *arg)
 {
@@ -30,12 +34,16 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             case WIFI_EVENT_AP_STACONNECTED: {
                 wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)event_data;
                 ESP_LOGI(TAG, "Station connected, AID=%d", event->aid);
+                s_sta_count.fetch_add(1, std::memory_order_relaxed);
                 WifiAp_ResetTimeout();
                 break;
             }
             case WIFI_EVENT_AP_STADISCONNECTED: {
                 wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *)event_data;
                 ESP_LOGI(TAG, "Station disconnected, AID=%d", event->aid);
+                /* fetch_sub 后若为负说明事件乱序，钳到 0 防止显示负数 */
+                int prev = s_sta_count.fetch_sub(1, std::memory_order_relaxed);
+                if (prev <= 0) s_sta_count.store(0, std::memory_order_relaxed);
                 break;
             }
             default:
@@ -96,6 +104,7 @@ esp_err_t WifiAp_Start(void)
     ESP_ERROR_CHECK(esp_wifi_start());
 
     s_state = WIFI_AP_STATE_ACTIVE;
+    s_sta_count.store(0, std::memory_order_relaxed);  /* 全新 AP 会话，清零站点计数 */
     WifiAp_ResetTimeout();
 
     if (s_state_cb) s_state_cb(s_state);
@@ -112,12 +121,17 @@ esp_err_t WifiAp_Stop(void)
         esp_timer_stop(s_timeout_timer);
     }
 
-    esp_wifi_stop();
+    /* 不调 esp_wifi_stop() —— 那是全局停 WiFi 驱动，APSTA 模式下会同时断 STA。
+     * 正确做法：切回 WIFI_MODE_STA，只关 AP 接口，STA 维持原连接不动。
+     * esp_wifi_set_mode() 在驱动已运行时平滑切换，不触发 STA 断开/重连。 */
+    esp_wifi_set_mode(WIFI_MODE_STA);
+
     s_state = WIFI_AP_STATE_IDLE;
+    s_sta_count.store(0, std::memory_order_relaxed);  /* AP 关闭，清零站点计数 */
 
     if (s_state_cb) s_state_cb(s_state);
 
-    ESP_LOGI(TAG, "AP stopped");
+    ESP_LOGI(TAG, "AP stopped (STA kept)");
     return ESP_OK;
 }
 
@@ -137,4 +151,9 @@ void WifiAp_ResetTimeout(void)
 void WifiAp_SetStateCallback(wifi_ap_state_cb_t cb)
 {
     s_state_cb = cb;
+}
+
+int WifiAp_GetStaCount(void)
+{
+    return s_sta_count.load(std::memory_order_relaxed);
 }

@@ -5,6 +5,9 @@
 #include "font_cn.h"
 #include "timer_ui.h"
 #include "timer_engine.h"
+#include "weather_ui.h"
+#include "wifi_ui.h"
+#include "pet_ui.h"
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,6 +17,9 @@ static ui_page_t s_current_page = PAGE_DASHBOARD;
 static lv_obj_t *s_dashboard_screen = NULL;
 static lv_obj_t *s_todo_screen = NULL;
 static lv_obj_t *s_timer_screen = NULL;
+static lv_obj_t *s_weather_screen = NULL;
+static lv_obj_t *s_wifi_screen = NULL;
+static lv_obj_t *s_pet_screen = NULL;
 
 /* ── Helper: clean container (no border, no scroll, transparent) ── */
 static lv_obj_t *create_quadrant(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
@@ -37,6 +43,9 @@ static void timer_entry_click_cb(lv_event_t *e)
     (void)e;
     ui_switch_page(PAGE_TIMER_TOOLS);
 }
+
+/* ── Top-right click → enter weather page (forward decl) ── */
+static void weather_entry_click_cb(lv_event_t *e);
 
 /* ── Top-left: Time + Date ─────────────────────────── */
 static void setup_top_left(lv_ui *ui)
@@ -71,41 +80,51 @@ static void setup_top_right(lv_ui *ui)
 
     /* Weather icon placeholder */
     ui->img_weather = lv_image_create(ui->cont_top_right);
-    lv_obj_set_pos(ui->img_weather, 38, 4);
+    lv_obj_set_pos(ui->img_weather, 38, 2);
     lv_obj_set_size(ui->img_weather, 24, 24);
 
-    /* Temperature */
+    /* Temperature — big anchor, shows INDOOR temp (SHTC3).
+     * montserrat_20 ships U+00B0 (°), so ° renders fine here. Outdoor temp
+     * and city were removed per request — this is now the only temp on the
+     * home screen. Fed by ui_update_temperature() from SHTC3. */
     ui->lbl_temperature = lv_label_create(ui->cont_top_right);
-    lv_obj_set_pos(ui->lbl_temperature, 0, 32);
-    lv_obj_set_size(ui->lbl_temperature, 100, 24);
+    lv_obj_set_pos(ui->lbl_temperature, 0, 28);
+    lv_obj_set_size(ui->lbl_temperature, 100, 22);
     lv_label_set_text(ui->lbl_temperature, "25\xC2\xB0" "C");  /* 25°C */
     lv_obj_set_style_text_font(ui->lbl_temperature, &lv_font_montserrat_20, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_temperature, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_align(ui->lbl_temperature, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
-    /* Humidity */
+    /* Humidity — indoor RH from SHTC3 */
     ui->lbl_humidity = lv_label_create(ui->cont_top_right);
-    lv_obj_set_pos(ui->lbl_humidity, 0, 58);
-    lv_obj_set_size(ui->lbl_humidity, 100, 18);
+    lv_obj_set_pos(ui->lbl_humidity, 0, 52);
+    lv_obj_set_size(ui->lbl_humidity, 100, 16);
     lv_label_set_text(ui->lbl_humidity, "62%");
     lv_obj_set_style_text_font(ui->lbl_humidity, &lv_font_chinese_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_humidity, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_align(ui->lbl_humidity, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
+    /* (lbl_indoor_temp removed — big lbl_temperature now shows indoor temp,
+     * a second small indoor-temp line would be redundant.) */
+
     /* WiFi + Battery at bottom.
      * These are FontAwesome glyphs — chinese_14 has no symbol range, so
      * use Montserrat 14 which bundles the symbol set. */
     ui->lbl_wifi = lv_label_create(ui->cont_top_right);
-    lv_obj_set_pos(ui->lbl_wifi, 4, 82);
+    lv_obj_set_pos(ui->lbl_wifi, 4, 84);
     lv_label_set_text(ui->lbl_wifi, LV_SYMBOL_WIFI);
     lv_obj_set_style_text_font(ui->lbl_wifi, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_wifi, lv_color_black(), LV_PART_MAIN);
 
     ui->lbl_battery = lv_label_create(ui->cont_top_right);
-    lv_obj_set_pos(ui->lbl_battery, 70, 82);
+    lv_obj_set_pos(ui->lbl_battery, 70, 84);
     lv_label_set_text(ui->lbl_battery, LV_SYMBOL_BATTERY_FULL);
     lv_obj_set_style_text_font(ui->lbl_battery, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_battery, lv_color_black(), LV_PART_MAIN);
+
+    /* Whole top-right quadrant is the entry to the weather page */
+    lv_obj_add_flag(ui->cont_top_right, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(ui->cont_top_right, weather_entry_click_cb, LV_EVENT_CLICKED, NULL);
 }
 
 /* ── Bottom-left quadrant click → navigate to TODO ── */
@@ -196,62 +215,6 @@ static void setup_bottom_right(lv_ui *ui)
     lv_obj_set_style_radius(ui->bar_timer_mini, 0, LV_PART_INDICATOR);
 
     lv_obj_add_flag(ui->cont_timer_mini, LV_OBJ_FLAG_HIDDEN);
-
-    /* AI conversation entry — hidden by default, shown by ui_update_ai_entry() */
-    ui->cont_ai = lv_obj_create(ui->cont_bottom_right);
-    lv_obj_set_size(ui->cont_ai, 100, 100);
-    lv_obj_set_pos(ui->cont_ai, 0, 0);
-    lv_obj_set_style_bg_opa(ui->cont_ai, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ui->cont_ai, 0, 0);
-    lv_obj_set_style_pad_all(ui->cont_ai, 0, 0);
-    lv_obj_set_style_radius(ui->cont_ai, 0, 0);
-    lv_obj_set_scrollbar_mode(ui->cont_ai, LV_SCROLLBAR_MODE_OFF);
-
-    /* Mic icon (centered) */
-    ui->lbl_ai_mic = lv_label_create(ui->cont_ai);
-    lv_obj_set_pos(ui->lbl_ai_mic, 0, 30);
-    lv_obj_set_size(ui->lbl_ai_mic, 100, 24);
-    lv_label_set_text(ui->lbl_ai_mic, LV_SYMBOL_AUDIO);
-    lv_obj_set_style_text_font(ui->lbl_ai_mic, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(ui->lbl_ai_mic, lv_color_black(), 0);
-    lv_obj_set_style_text_align(ui->lbl_ai_mic, LV_TEXT_ALIGN_CENTER, 0);
-
-    /* Status text (below mic) */
-    ui->lbl_ai_status = lv_label_create(ui->cont_ai);
-    lv_obj_set_pos(ui->lbl_ai_status, 0, 58);
-    lv_obj_set_size(ui->lbl_ai_status, 100, 14);
-    lv_label_set_text(ui->lbl_ai_status, "");
-    lv_obj_set_style_text_font(ui->lbl_ai_status, &lv_font_chinese_14, 0);
-    lv_obj_set_style_text_color(ui->lbl_ai_status, lv_color_black(), 0);
-    lv_obj_set_style_text_align(ui->lbl_ai_status, LV_TEXT_ALIGN_CENTER, 0);
-
-    /* Result text (hidden, shown when displaying LLM reply) */
-    ui->lbl_ai_text = lv_label_create(ui->cont_ai);
-    lv_obj_set_pos(ui->lbl_ai_text, 2, 4);
-    lv_obj_set_size(ui->lbl_ai_text, 96, 92);
-    lv_label_set_text(ui->lbl_ai_text, "");
-    lv_label_set_long_mode(ui->lbl_ai_text, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_font(ui->lbl_ai_text, &lv_font_chinese_14, 0);
-    lv_obj_set_style_text_color(ui->lbl_ai_text, lv_color_black(), 0);
-    lv_obj_set_style_text_align(ui->lbl_ai_text, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_add_flag(ui->lbl_ai_text, LV_OBJ_FLAG_HIDDEN);
-
-    lv_obj_add_flag(ui->cont_ai, LV_OBJ_FLAG_HIDDEN);
-}
-
-/* ── Public: AI entry show/hide (mutually exclusive with timer/placeholder) ── */
-void ui_update_ai_entry(bool show)
-{
-    /* AI 优先策略：cont_ai 始终可见，番茄钟 mini 和 placeholder 永久隐藏 */
-    lv_obj_clear_flag(ui.cont_ai, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(ui.lbl_image_placeholder, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(ui.cont_timer_mini, LV_OBJ_FLAG_HIDDEN);
-}
-
-/* ── Public: instance accessor for ai_ui.c ── */
-lv_ui *ui_get_instance(void)
-{
-    return &ui;
 }
 
 /* ── Public API ────────────────────────────────────── */
@@ -403,6 +366,32 @@ void ui_update_todo_summary(void)
     }
 }
 
+/* ── Weather summary (main-screen top-right) ──
+ * Home screen no longer shows outdoor temp/city — only indoor sensors.
+ * lbl_temperature/lbl_humidity are now fed directly by ui_update_temperature
+ * /ui_update_humidity from SHTC3. This function kept for the page-render
+ * path (fresh fetch while on the weather page) and ABI stability.
+ * Call under Lvgl_Lock. */
+void ui_update_weather_summary(const weather_snapshot_t *snapshot,
+                               float indoor_temp_c, bool outdoor_available)
+{
+    (void)indoor_temp_c;
+    (void)outdoor_available;
+
+    /* Fresh fetch just completed — repaint the weather page if it's open.
+     * The home screen needs no outdoor data anymore. */
+    if (snapshot && ui_get_current_page() == PAGE_WEATHER) {
+        WeatherUI_Render(snapshot, false);
+    }
+}
+
+/* ── Top-right click → enter weather page ── */
+static void weather_entry_click_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_switch_page(PAGE_WEATHER);
+}
+
 /* ── Page management ── */
 void ui_switch_page(ui_page_t page)
 {
@@ -432,6 +421,32 @@ void ui_switch_page(ui_page_t page)
                                                         TIMER_PAGE_TOOLS;
             TimerUi_ShowPage(tp);
             lv_screen_load(s_timer_screen);
+        }
+    } else if (page == PAGE_WEATHER) {
+        if (!s_weather_screen) {
+            s_weather_screen = WeatherUI_GetScreen();
+        }
+        if (s_weather_screen) {
+            lv_screen_load(s_weather_screen);
+            /* Render the current snapshot immediately on entry. data_task
+             * only renders when a *fresh* fetch completes while already on
+             * this page, so without this call a cached snapshot would show
+             * a blank screen full of empty labels until the next fetch. */
+            WeatherUI_RenderIfCached();
+        }
+    } else if (page == PAGE_WIFI_MGMT) {
+        if (!s_wifi_screen) {
+            s_wifi_screen = WifiUi_GetScreen();
+        }
+        if (s_wifi_screen) {
+            lv_screen_load(s_wifi_screen);
+        }
+    } else if (page == PAGE_PET) {
+        if (!s_pet_screen) {
+            s_pet_screen = PetUi_GetScreen();
+        }
+        if (s_pet_screen) {
+            lv_screen_load(s_pet_screen);
         }
     }
 }

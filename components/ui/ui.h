@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "lvgl.h"
+#include "weather_fetch.h"
 
 /* ── Widget handles (runtime-updatable widgets) ────── */
 typedef struct {
@@ -16,11 +17,12 @@ typedef struct {
     lv_obj_t *lbl_time;
     lv_obj_t *lbl_date;
 
-    /* Top-right: weather + status */
+    /* Top-right: indoor temp/humidity + status (outdoor weather moved to
+     * the dedicated weather page — home screen shows indoor sensors only) */
     lv_obj_t *cont_top_right;
     lv_obj_t *img_weather;
-    lv_obj_t *lbl_temperature;
-    lv_obj_t *lbl_humidity;
+    lv_obj_t *lbl_temperature;   /* big indoor temp (montserrat_20, has °) */
+    lv_obj_t *lbl_humidity;      /* indoor RH (chinese_14) */
     lv_obj_t *lbl_wifi;
     lv_obj_t *lbl_battery;
 
@@ -54,6 +56,13 @@ void ui_update_wifi_status(bool connected);
 void ui_update_todo_summary(void);
 void ui_update_timer_mini(bool running, uint32_t remaining_sec, uint32_t total_sec);
 
+/* ── Weather summary (main-screen top-right) ──
+ * snapshot == NULL or outdoor_available == false → show indoor sensors only.
+ * Otherwise show outdoor temp/humidity + indoor temp on lbl_indoor_temp.
+ * Call under Lvgl_Lock. */
+void ui_update_weather_summary(const weather_snapshot_t *snapshot,
+                               float indoor_temp_c, bool outdoor_available);
+
 /* ── Page management ── */
 typedef enum {
     PAGE_DASHBOARD,
@@ -62,6 +71,9 @@ typedef enum {
     PAGE_TIMER_TOOLS,
     PAGE_POMODORO,
     PAGE_REMINDER,
+    PAGE_WEATHER,
+    PAGE_WIFI_MGMT,
+    PAGE_PET,
 } ui_page_t;
 
 void ui_switch_page(ui_page_t page);

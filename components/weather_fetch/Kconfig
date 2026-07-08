@@ -1,0 +1,41 @@
+config WEATHER_API_KEY
+    string "QWeather API Key"
+    default ""
+    help
+        和风天气 API Key。留空时天气功能不生效，主屏退回室内传感器模式。
+        也可通过 Web 配置接口 POST /api/weather/config 写入 NVS 覆盖此默认值。
+
+config WEATHER_LOCATION_ID
+    string "QWeather Location ID (城市编码)"
+    default "101010100"
+    help
+        QWeather 城市编码，如北京的 101010100。可通过 https://github.com/qwd/LocationList 查询。
+
+config WEATHER_CITY_NAME
+    string "QWeather 城市显示名称"
+    default "北京"
+    help
+        主屏和天气页显示的城市名。
+
+config WEATHER_API_BASE_URL
+    string "QWeather API Base URL"
+    default "mt6apynm24.re.qweatherapi.com"
+    help
+        2026 年起 QWeather 用每个开发者专属的 API Host 做身份认证
+        （形如 xxx.qweatherapi.com），在控制台 console.qweather.com/setting
+        查看。老的 devapi/api.qweather.com 已逐步停服并返回 403 Invalid Host。
+        也可通过 Web 配置接口写入 NVS 覆盖此默认值。
+
+config WEATHER_FETCH_INTERVAL_MIN
+    int "天气刷新间隔（分钟）"
+    range 10 120
+    default 30
+    help
+        正常联网时天气拉取间隔。最小 10 分钟避免 QWeather 限流。
+
+config WEATHER_CACHE_TTL_MIN
+    int "缓存有效期（分钟）"
+    range 30 720
+    default 120
+    help
+        缓存超过此时间标注"数据过旧"，但仍显示。

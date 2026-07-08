@@ -22,9 +22,11 @@
 #include "timer_engine.h"
 #include "timer_ui.h"
 #include "standby_screen.h"
-#include "ai_engine.h"
-#include "ai_ui.h"
-#include "audio_bsp.h"
+#include "weather_fetch.h"
+#include "weather_cache.h"
+#include "weather_ui.h"
+#include "wifi_ui.h"
+#include "pet_ui.h"
 #include "esp_sleep.h"
 #include "driver/rtc_io.h"
 #include "nvs_flash.h"
@@ -40,9 +42,38 @@ static epaper_driver_display *epd = nullptr;
 /* Task handles for deep sleep cleanup */
 static TaskHandle_t s_data_task_handle = nullptr;
 static TaskHandle_t s_boot_key_task_handle = nullptr;
+static TaskHandle_t s_pwr_key_task_handle = nullptr;
+/* Reentrancy guard: enter_deep_sleep() does a multi-step teardown
+ * (delete tasks → deinit LVGL/WiFi/I2C → draw standby → sleep). If the
+ * user keeps mashing PWR, pwr_key_task could fire a second teardown while
+ * the first is mid-flight and half the peripherals are gone. This flag
+ * makes the second call a no-op. */
+static volatile bool s_entering_sleep = false;
+
+/* Last tick when user was on a non-pet page (for idle return-to-pet). */
+static volatile uint32_t s_last_activity_tick = 0;
 
 /* WiFi lazy-init: cold boot sets this true; wakeup path defers until BOOT long-press */
 static bool s_wifi_lazy_inited = false;
+
+/* HTTP server "should be running" intent. Set true once we want the web API
+ * available; the data_task monitors WiFi STA state and starts/stops the HTTP
+ * server to match — server follows STA connectivity, NOT the AP hotspot.
+ * (AP hotspot lifecycle is still owned by the BOOT long-press handler.) */
+static bool s_web_want_running = false;
+static bool s_web_is_running = false;
+
+/* ── Weather state ──
+ * s_weather_snapshot holds the most recent successful (or cached) snapshot.
+ * s_weather_has_cached tracks whether we have any data to render.
+ * s_indoor_temp_c caches the latest SHTC3 reading so the weather summary
+ * can show indoor temp alongside outdoor data (SHTC3 is read inline in
+ * data_task; without a cache we'd have no value to pass to the summary). */
+static weather_snapshot_t s_weather_snapshot;
+static bool s_weather_has_cached = false;
+static int s_weather_fetch_tick = 0;          /* seconds since last fetch attempt */
+static int s_weather_consecutive_fail = 0;    /* backoff multiplier source */
+static float s_indoor_temp_c = 0.0f;          /* latest SHTC3 temperature */
 
 static void enter_deep_sleep(void);
 
@@ -75,7 +106,28 @@ static void wifi_lazy_init(void)
     }
     WifiAp_Init();
     TodoWeb_Init();
+    /* HTTP server now follows STA connectivity (see web_server_reconcile).
+     * Mark intent so data_task starts the server once STA is up. */
+    s_web_want_running = true;
     ESP_LOGI(TAG, "WiFi lazy-init done");
+}
+
+/* Reconcile HTTP server state with intent + STA connectivity.
+ * Server follows STA (not the AP hotspot): start when STA is up and we want
+ * it, stop when STA drops so we don't serve on a dead interface. Idempotent. */
+static void web_server_reconcile(void)
+{
+    bool want = s_web_want_running && WifiBsp_IsConnected();
+    if (want && !s_web_is_running) {
+        if (TodoWeb_Start() == ESP_OK) {
+            s_web_is_running = true;
+            ESP_LOGI(TAG, "HTTP server started (STA up)");
+        }
+    } else if (!want && s_web_is_running) {
+        TodoWeb_Stop();
+        s_web_is_running = false;
+        ESP_LOGI(TAG, "HTTP server stopped (STA down)");
+    }
 }
 
 /* Back callback: TODO lists page → dashboard.
@@ -93,6 +145,76 @@ static void timer_back_cb(void)
     ui_switch_page(PAGE_DASHBOARD);
 }
 
+/* Weather page back callback: weather page → dashboard. Runs inside LVGL lock. */
+static void weather_back_cb(void)
+{
+    ui_switch_page(PAGE_DASHBOARD);
+}
+
+/* Pet page back callback: pet → dashboard (single click). Runs inside LVGL lock. */
+static void pet_back_cb(void)
+{
+    ui_switch_page(PAGE_DASHBOARD);
+}
+
+/* Weather page refresh callback: runs inside LVGL lock (button click).
+ * Just sets the refresh flag — the actual HTTPS fetch happens in data_task
+ * on the next 1s tick, OUTSIDE the LVGL lock (TLS + JSON parse must not
+ * hold the UI mutex). */
+static void weather_refresh_cb(void)
+{
+    if (WifiBsp_IsConnected()) {
+        WeatherFetch_RequestRefresh();
+        ESP_LOGI(TAG, "Weather refresh requested (on-screen button)");
+    } else {
+        ESP_LOGW(TAG, "Weather refresh requested but WiFi down");
+    }
+}
+
+/* ── WiFi 管理页面回调（均在 LVGL 锁内触发，只做轻量动作） ── */
+
+/* 返回 dashboard（左滑 / 返回按钮）。运行在 LVGL 锁内，不要再 Lock。 */
+static void wifi_back_cb(void)
+{
+    ui_switch_page(PAGE_DASHBOARD);
+}
+
+/* AP 启停按钮：WiFi 管理页里的显式入口（长按 BOOT 不再切 AP，只进界面）。
+ * 这里仍在 LVGL 锁内，但 WifiAp_Start/Stop 内部只配 wifi 模式 + 起停定时器，
+ * 不持有 LVGL 锁，安全。WifiAp_Stop 切回 WIFI_MODE_STA，不影响 STA 连接。 */
+static void wifi_toggle_ap_cb(void)
+{
+    wifi_lazy_init();
+    if (WifiAp_IsActive()) {
+        WifiAp_Stop();
+        ESP_LOGI(TAG, "AP stopped (wifi_ui button)");
+    } else {
+        if (WifiAp_Start() == ESP_OK) {
+            ESP_LOGI(TAG, "AP started (wifi_ui button)");
+        }
+    }
+}
+
+/* STA 重连：触发 WifiBsp_Reconnect（非阻塞，仅发起重连）。
+ * 在 LVGL 锁内调用安全——Reconnect 不持有任何 UI 锁。 */
+static void wifi_reconnect_cb(void)
+{
+    if (!s_wifi_lazy_inited) {
+        wifi_lazy_init();
+    }
+    if (WifiBsp_Reconnect() == ESP_OK) {
+        ESP_LOGI(TAG, "STA reconnect requested (wifi_ui button)");
+    } else {
+        ESP_LOGW(TAG, "STA reconnect failed (wifi_ui button)");
+    }
+}
+
+/* 刷新天气：与天气页原按钮等价（按钮已移除，入口搬到 WiFi 管理页）。 */
+static void wifi_refresh_weather_cb(void)
+{
+    weather_refresh_cb();
+}
+
 /* Timer fired: runs in FreeRTOS timer service task — MUST NOT touch LVGL.
  * Just enqueue; data_task consumes it under the LVGL lock. */
 static void timer_fired_cb(const timer_instance_t *t)
@@ -100,73 +222,58 @@ static void timer_fired_cb(const timer_instance_t *t)
     TimerUi_PushFiredEvent(t->id, t->kind, t->total_seconds);
 }
 
-/* ── AI engine callbacks (run inside Lvgl_Lock via data_task) ── */
-static void ai_state_cb(ai_state_t state)
-{
-    /* AI entry always visible; just update state icon/text */
-    AiUi_UpdateState(state, NULL, NULL);
-}
-
-static void ai_llm_result_cb(const char *reply)
-{
-    AiUi_UpdateState(AI_STATE_DISPLAYING, NULL, reply);
-}
-
-static void ai_transcript_cb(const char *text, bool is_final)
-{
-    (void)is_final;
-    if (text) {
-        AiUi_UpdateState(AiEngine_GetState(), text, NULL);
-    }
-}
-
-/* BOOT key: long-press → AP toggle (existing), short-press → AI toggle (new). */
+/* BOOT key:
+ * - short press (< 300 ms): cycle pet ↔ dashboard ↔ todo; other screens → pet
+ * - long press (2 s): enter WiFi management page (AP toggle moved to UI button). */
 static void boot_key_task(void *arg)
 {
     TickType_t press_start = 0;
+    bool long_handled = false;
 
     for (;;) {
         if (gpio_get_level((gpio_num_t)0) == 0) {  // BOOT pressed (low active)
             if (press_start == 0) {
                 press_start = xTaskGetTickCount();
-            } else if ((xTaskGetTickCount() - press_start) > pdMS_TO_TICKS(2000)) {
+                long_handled = false;
+            } else if (!long_handled &&
+                       (xTaskGetTickCount() - press_start) > pdMS_TO_TICKS(2000)) {
                 // Long press 2 seconds
                 ESP_LOGI(TAG, "BOOT long press detected");
+                long_handled = true;
 
                 // Lazy-init WiFi stack if not already done (needed after wakeup)
                 wifi_lazy_init();
 
-                if (WifiAp_IsActive()) {
-                    TodoWeb_Stop();
-                    WifiAp_Stop();
-                    ESP_LOGI(TAG, "AP stopped");
-                } else {
-                    if (WifiAp_Start() == ESP_OK) {
-                        TodoWeb_Start();
-                        ESP_LOGI(TAG, "AP started, connect to 'AIoT-TODO'");
-                    }
+                /* 长按 BOOT 仅进入 WiFi 管理界面，AP 启停改由界面内的按钮控制。
+                 * HTTP server 仍跟随 STA 连通性（见 data_task 的 web_server_reconcile），
+                 * 与 AP 热点生命周期解耦。
+                 * boot_key_task 在 Core 1，跨核取 LVGL 锁安全（参考 data_task）。 */
+                if (Lvgl_Lock(500)) {
+                    ui_switch_page(PAGE_WIFI_MGMT);
+                    Lvgl_Unlock();
                 }
-
-                press_start = 0;
-                vTaskDelay(pdMS_TO_TICKS(500));  // Debounce
             }
         } else {
-            /* Released — detect short press (< 500 ms) for AI toggle. */
-            if (press_start != 0) {
+            /* Released */
+            if (press_start != 0 && !long_handled) {
                 TickType_t held = xTaskGetTickCount() - press_start;
-                if (held > pdMS_TO_TICKS(30) && held < pdMS_TO_TICKS(500)) {
-                    ESP_LOGI(TAG, "BOOT short press → AI toggle");
-                    if (AiEngine_GetState() == AI_STATE_IDLE) {
-                        AiEngine_StartRecording();
-                    } else if (AiEngine_GetState() == AI_STATE_STREAMING) {
-                        AiEngine_StopRecording();
-                    } else {
-                        /* In FINALIZING/WAITING_LLM/DISPLAYING: abort to IDLE. */
-                        AiEngine_Abort();
+                if (held < pdMS_TO_TICKS(300)) {
+                    /* Short press: cycle screens */
+                    if (Lvgl_Lock(500)) {
+                        ui_page_t cur = ui_get_current_page();
+                        if (cur == PAGE_PET) {
+                            ui_switch_page(PAGE_DASHBOARD);
+                        } else if (cur == PAGE_DASHBOARD) {
+                            ui_switch_page(PAGE_TODO_LISTS);
+                        } else {
+                            ui_switch_page(PAGE_PET);
+                        }
+                        Lvgl_Unlock();
                     }
                 }
             }
             press_start = 0;
+            long_handled = false;
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -202,17 +309,31 @@ static void pwr_key_task(void *arg)
 
 static void enter_deep_sleep(void)
 {
+    /* Reentrancy guard: a second PWR double-click while the first call is
+     * tearing down peripherals would deinit I2C/LVGL a second time and
+     * panic. Once we're committed, ignore further triggers. */
+    if (s_entering_sleep) return;
+    s_entering_sleep = true;
+
     ESP_LOGI(TAG, "Preparing deep sleep...");
 
-    /* 0. Force AI engine to IDLE first — closes WS, deinits record,
-     *    avoids dangling network sockets / tasks during teardown. */
-    if (AiEngine_IsActive()) {
-        ESP_LOGW(TAG, "AI engine active (state=%d) — forcing shutdown", AiEngine_GetState());
-    }
-    AiEngine_PrepareDeepSleep();
+    /* We do NOT delete pwr_key_task here, even though this function runs
+     * inside it. FreeRTOS marks a self-deleting task for deletion at the
+     * next yield (vTaskDelay/vTaskSuspend); after that yield the scheduler
+     * never returns to this task, so every line below (LVGL/WiFi/I2C
+     * teardown, standby draw, esp_deep_sleep_start) would be dead code and
+     * the device would hang awake draining battery. The s_entering_sleep
+     * guard above already makes a second PWR double-click a no-op, so
+     * deleting the task is unnecessary. Run the full teardown in this task
+     * and let esp_deep_sleep_start() end it. */
+    (void)s_pwr_key_task_handle;
 
-    /* 1. Delete application tasks FIRST — data_task may hold LVGL/I2C.
-     *    Must be gone before we touch LVGL or I2C. */
+    /* 1. Delete application tasks — data_task may hold LVGL/I2C.
+     *    Must be gone before we touch LVGL or I2C. The 50 ms delay lets
+     *    the idle task reclaim their stacks; it's not a guarantee that
+     *    data_task released every mutex, but vTaskDelete can't wait for
+     *    that. The deepest hazard (data_task mid-I2C-transfer) is covered
+     *    by i2c_master_Deinit recreating the bus on wake. */
     if (s_data_task_handle) {
         vTaskDelete(s_data_task_handle);
         s_data_task_handle = nullptr;
@@ -221,46 +342,58 @@ static void enter_deep_sleep(void)
         vTaskDelete(s_boot_key_task_handle);
         s_boot_key_task_handle = nullptr;
     }
-    vTaskDelay(pdMS_TO_TICKS(50));  /* Let idle task clean up; ensures data_task
-                                      * has released any mutex it may hold. */
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     /* 2. Stop LVGL — its handler task reads touch via I2C,
      *    and its tick timer keeps firing. */
     Lvgl_PortDeinit();
 
-    /* 3. Stop AP + Web server if active */
-    if (WifiAp_IsActive()) {
+    /* 3. Stop HTTP server if running (decoupled from AP) */
+    if (s_web_is_running) {
         TodoWeb_Stop();
+        s_web_is_running = false;
+    }
+    s_web_want_running = false;
+
+    /* 4. Tear down the AP first if it's up — WifiBsp_Deinit calls
+     *    esp_wifi_stop()/deinit() and APSTA mode must be collapsed to STA
+     *    cleanly before the driver goes away. WifiAp_Stop is a no-op if
+     *    the AP is already idle. */
+    if (s_wifi_lazy_inited) {
         WifiAp_Stop();
     }
 
-    /* 4. Deinit WiFi (unregister handlers + disconnect + stop + deinit) */
+    /* 5. Deinit WiFi (unregister handlers + disconnect + stop + deinit) */
     WifiBsp_Deinit();
 
-    /* 5. Persist timers BEFORE I2C deinit (Persist reads RTC via I2C) */
+    /* 6. Persist timers BEFORE I2C deinit (Persist reads RTC via I2C) */
     TimerEngine_Persist();
 
-    /* 6. Deinit I2C (removes RTC, SHTC3, Touch — all on shared bus) */
+    /* 7. Detach the FT6336 touch device, THEN tear down the shared I2C bus.
+     *    The touch device handle lives in port_touch.c and i2c_bsp can't
+     *    see it; calling i2c_del_master_bus with the device still attached
+     *    is undefined and leaks the slot across sleep/wake cycles. */
+    PortTouch_Deinit();
     i2c_master_Deinit();
 
-    /* 7. Draw standby screen (reads SPIFFS for custom image — MUST be before unmount) */
+    /* 8. Draw standby screen (reads SPIFFS for custom image — MUST be before unmount) */
     StandbyScreen_Draw(epd);
 
-    /* 8. Unmount SPIFFS cleanly before sleep */
+    /* 9. Unmount SPIFFS cleanly before sleep */
     esp_vfs_spiffs_unregister(NULL);
 
-    /* 9. Hold power pins state during deep sleep */
+    /* 10. Hold power pins state during deep sleep */
     gpio_hold_en(EPD_PWR_PIN);     // Keep EPD powered (LOW = ON)
     gpio_hold_en(AUDIO_PWR_PIN);   // Keep audio powered (LOW = ON)
     gpio_hold_en(VBAT_PWR_PIN);    // Keep battery powered (HIGH = ON)
     gpio_deep_sleep_hold_en();     // Latch digital GPIO hold through deep sleep
 
-    /* 10. Configure EXT1 wakeup: PWR (IO18) or BOOT (IO0), any low */
+    /* 11. Configure EXT1 wakeup: PWR (IO18) or BOOT (IO0), any low */
     esp_sleep_enable_ext1_wakeup(
         (1ULL << PWR_BUTTON_PIN) | (1ULL << BOOT_BUTTON_PIN),
         ESP_EXT1_WAKEUP_ANY_LOW);
 
-    /* 11. Power domain config */
+    /* 12. Power domain config */
     esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_AUTO);
     esp_sleep_pd_config(ESP_PD_DOMAIN_RC_FAST, ESP_PD_OPTION_OFF);
     esp_sleep_pd_config(ESP_PD_DOMAIN_XTAL, ESP_PD_OPTION_OFF);
@@ -299,6 +432,7 @@ static void data_task(void *arg)
         /* SHTC3 — every 30 s */
         if (tick % 30 == 0) {
             shtc3_data_t sht = PortShtc3_Read();
+            s_indoor_temp_c = sht.Temp;   /* cache for weather summary */
             if (Lvgl_Lock(500)) {
                 ui_update_temperature((int)(sht.Temp + 0.5f));
                 ui_update_humidity((int)(sht.RH + 0.5f));
@@ -325,13 +459,56 @@ static void data_task(void *arg)
             }
         }
 
-        /* WiFi status — every 10 s */
-        if (tick % 10 == 0) {
-            bool connected = WifiBsp_IsConnected();
+        /* Pet UI refresh — every 30 s (recompute expression) */
+        if (tick % 30 == 0) {
             if (Lvgl_Lock(500)) {
-                ui_update_wifi_status(connected);
+                PetUi_Refresh();
                 Lvgl_Unlock();
             }
+        }
+
+        /* Idle return to pet page: if user stays on a non-pet page for 60 s,
+         * auto-switch back to the pet (screen-saver behavior). */
+        {
+            ui_page_t cur = ui_get_current_page();
+            if (cur != PAGE_PET) {
+                if (s_last_activity_tick == 0) s_last_activity_tick = tick;
+                if ((tick - s_last_activity_tick) >= 60) {
+                    if (Lvgl_Lock(500)) {
+                        ui_switch_page(PAGE_PET);
+                        Lvgl_Unlock();
+                    }
+                    s_last_activity_tick = 0;
+                }
+            } else {
+                s_last_activity_tick = 0;
+            }
+        }
+
+        /* WiFi status — every 10 s.
+         * Also reconciles the HTTP server: it follows STA connectivity, so
+         * start it the moment STA comes up (no need to long-press BOOT just
+         * to reach the web API), and stop it if STA drops. */
+        if (tick % 10 == 0) {
+            bool connected = WifiBsp_IsConnected();
+            bool ap_active = s_wifi_lazy_inited ? WifiAp_IsActive() : false;
+            if (Lvgl_Lock(500)) {
+                ui_update_wifi_status(connected);
+                /* 若当前在 WiFi 管理页，同步刷新该页的 AP/STA 状态显示 */
+                if (ui_get_current_page() == PAGE_WIFI_MGMT) {
+                    char ssid_buf[40] = "";
+                    char ip_buf[20] = "";
+                    if (connected) {
+                        WifiBsp_GetSsid(ssid_buf, sizeof(ssid_buf));
+                        WifiBsp_GetIp(ip_buf, sizeof(ip_buf));
+                    }
+                    int stas = ap_active ? WifiAp_GetStaCount() : 0;
+                    WifiUi_UpdateStatus(connected, ap_active,
+                                        ssid_buf, ip_buf, NULL, stas);
+                }
+                Lvgl_Unlock();
+            }
+            web_server_reconcile();
         }
 
         /* Every 1 s: timer UI tick (fired-queue poll + per-minute refresh),
@@ -343,15 +520,68 @@ static void data_task(void *arg)
                 ui_update_timer_mini(true, pomo->remaining_sec, pomo->total_seconds);
             else
                 ui_update_timer_mini(false, 0, 0);
-            /* Drive AI engine state machine (1 s tick). Callbacks run
-             * inside this lock and touch LVGL safely. */
-            AiEngine_Tick();
+            /* AI engine tick removed (AI headers not in this checkout). */
             Lvgl_Unlock();
         }
 
         uint16_t tx, ty;
         if (PortTouch_GetPoint(&tx, &ty)) {
             ESP_LOGI(TAG, "Touch: (%d, %d)", tx, ty);
+        }
+
+        /* ── Weather refresh (1 s tick, throttled internally) ──
+         * HTTP fetch + NVS save run OUTSIDE Lvgl_Lock; only the UI
+         * render/summary update acquires the lock. Backoff doubles the
+         * interval (up to 2 h) after 3 consecutive failures.
+         * Web API can request an immediate refresh via WeatherFetch_RequestRefresh(). */
+        if (WeatherFetch_IsReady() && WifiBsp_IsConnected()) {
+            int interval = CONFIG_WEATHER_FETCH_INTERVAL_MIN * 60;  /* seconds */
+            if (s_weather_consecutive_fail >= 3) {
+                int shift = s_weather_consecutive_fail - 2;  /* 3→×2, 4→×4, ... */
+                if (shift > 6) shift = 6;                    /* cap ×64 */
+                interval = interval << shift;
+                if (interval > 7200) interval = 7200;
+            }
+            s_weather_fetch_tick++;
+            bool due = (s_weather_fetch_tick >= interval);
+            bool manual = WeatherFetch_ConsumeRefreshRequest();
+            if (due || manual) {
+                s_weather_fetch_tick = 0;
+                if (manual) ESP_LOGI(TAG, "Weather: manual refresh triggered");
+                weather_snapshot_t snap;
+                memset(&snap, 0, sizeof(snap));
+                bool ok = WeatherFetch_Update(&snap);  /* NOT under Lvgl_Lock */
+                if (ok) {
+                    WeatherCache_Save(&snap);           /* NOT under Lvgl_Lock */
+                    /* Snapshot copy moved INSIDE the Lvgl_Lock below: the
+                     * ~300-byte struct write was racing with the Lvgl_Lock'd
+                     * read in ui_update_weather_summary. Doing the copy under
+                     * the same lock that guards the read closes the race.
+                     * s_weather_has_cached is also set under the lock so a
+                     * reader can't see cached==true with a still-stale
+                     * snapshot (the flag is the contract that the snapshot
+                     * is valid). */
+                    s_weather_consecutive_fail = 0;
+                    if (Lvgl_Lock(500)) {
+                        s_weather_snapshot = snap;
+                        s_weather_has_cached = true;
+                        /* Home screen shows indoor sensors only now; the
+                         * summary call repaints the weather page if it's
+                         * currently open. */
+                        ui_update_weather_summary(&s_weather_snapshot,
+                                                  s_indoor_temp_c, true);
+                        Lvgl_Unlock();
+                    }
+                } else {
+                    ESP_LOGW(TAG, "Weather fetch failed: %s",
+                             WeatherFetch_LastError());
+                    s_weather_consecutive_fail++;
+                }
+            }
+        } else {
+            /* Drain a stale manual request so it doesn't fire the moment
+             * WiFi/config becomes ready later. */
+            (void)WeatherFetch_ConsumeRefreshRequest();
         }
 
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -415,6 +645,15 @@ extern "C" void app_main(void)
             .spi_host = EPD_SPI_NUM,
             .buffer_len = 5000,
         };
+        /* Free the previous EPD object before re-allocating. On wake we
+         * re-run app_main, so the global `epd` still points at the
+         * pre-sleep object whose SPI context is now invalid. Deleting it
+         * runs the destructor that frees the PSRAM framebuffer — without
+         * this, every wake leaked ~5KB of PSRAM plus a dangling object. */
+        if (epd) {
+            delete epd;
+            epd = nullptr;
+        }
         epd = new epaper_driver_display(EPD_WIDTH, EPD_HEIGHT, lcd_cfg);
         epd->EPD_Init();
         epd->EPD_DisplayPartBaseImage();
@@ -455,22 +694,7 @@ extern "C" void app_main(void)
         }
         TimerEngine_SetFiredCallback(timer_fired_cb);
 
-        /* AI engine + UI re-init on wakeup */
-        /* Probe audio hardware — verifies codec/I2S after deep sleep */
-        if (AudioBsp_InitRecord() == ESP_OK) {
-            AudioBsp_DeinitRecord();
-            ESP_LOGI(TAG, "AudioBsp probed OK (wakeup)");
-        } else {
-            ESP_LOGW(TAG, "AudioBsp probe failed (wakeup) — AI voice will not work");
-        }
-
-        AiEngine_Init(ai_state_cb, ai_transcript_cb, ai_llm_result_cb);
-        if (Lvgl_Lock(-1)) {
-            AiUi_Init();
-            AiUi_ShowEntry(true);  /* Show mic icon on dashboard */
-            Lvgl_Unlock();
-        }
-        ESP_LOGI(TAG, "AI engine + UI re-init done");
+        /* AI engine + UI re-init removed (AI headers not in this checkout). */
 
         /* TODO Manager + UI */
         TodoMgr_Init();
@@ -480,16 +704,63 @@ extern "C" void app_main(void)
             Lvgl_Unlock();
         }
 
+        /* Weather: restore cache from NVS (no WiFi on wake path), render it.
+         * WiFi stays deferred until BOOT long-press; weather won't refresh
+         * until then — by design, per the spec. */
+        WeatherCache_Init();
+        s_weather_has_cached = WeatherCache_Load(&s_weather_snapshot);
+        WeatherFetch_Init();
+        if (Lvgl_Lock(-1)) {
+            WeatherUI_Init();
+            WeatherUI_SetBackCallback(weather_back_cb);
+            if (s_weather_has_cached) {
+                WeatherUI_Render(&s_weather_snapshot, true);
+            }
+            Lvgl_Unlock();
+        }
+        ESP_LOGI(TAG, "Weather cache re-init: %s",
+                 s_weather_has_cached ? "loaded" : "empty");
+
+        /* WiFi 管理 UI（AP/STA 状态 + 启停/重连/刷新天气入口） */
+        if (Lvgl_Lock(-1)) {
+            WifiUi_Init();
+            WifiUi_SetBackCallback(wifi_back_cb);
+            WifiUi_SetToggleApCallback(wifi_toggle_ap_cb);
+            WifiUi_SetReconnectCallback(wifi_reconnect_cb);
+            WifiUi_SetRefreshWeatherCallback(wifi_refresh_weather_cb);
+            Lvgl_Unlock();
+        }
+        ESP_LOGI(TAG, "WiFi UI re-init done");
+
+        /* Pet UI (default screen on wake too) */
+        if (Lvgl_Lock(-1)) {
+            PetUi_Init();
+            PetUi_SetBackCallback(pet_back_cb);
+            Lvgl_Unlock();
+        }
+
         /* WiFi AP + Web deferred — lazy-init on BOOT long-press */
 
         /* Start data task */
-        xTaskCreatePinnedToCore(data_task, "data", 7 * 1024, nullptr, 3, &s_data_task_handle, 0);
+        /* data_task stack must fit mbedTLS HTTPS handshake (~30KB peak
+         * during TLS connect) plus the 4KB JSON recv buffers in
+         * WeatherFetch_Update, on top of the regular sensor/UI work.
+         * 7KB was too small — caused stack overflow panic on weather fetch. */
+        xTaskCreatePinnedToCore(data_task, "data", 12 * 1024, nullptr, 3, &s_data_task_handle, 0);
 
         /* Start BOOT key task */
         xTaskCreatePinnedToCore(boot_key_task, "boot_key", 4 * 1024, nullptr, 5, &s_boot_key_task_handle, 1);
 
         /* Start PWR key task */
-        xTaskCreatePinnedToCore(pwr_key_task, "pwr_key", 3 * 1024, nullptr, 5, nullptr, 1);
+        xTaskCreatePinnedToCore(pwr_key_task, "pwr_key", 3 * 1024, nullptr, 5, &s_pwr_key_task_handle, 1);
+
+        /* Default screen on wake too — match cold-boot behavior so the
+         * device always lands on the pet screen, not whichever page
+         * ui_init happened to load last. */
+        if (Lvgl_Lock(-1)) {
+            ui_switch_page(PAGE_PET);
+            Lvgl_Unlock();
+        }
 
         ESP_LOGI(TAG, "=== Fast recovery complete ===");
         return;
@@ -590,29 +861,37 @@ extern "C" void app_main(void)
     TimerEngine_SetFiredCallback(timer_fired_cb);
     ESP_LOGI(TAG, "Timer fired callback registered");
 
-    /* AI engine + UI — must init before data_task starts so the first
-     * AiEngine_Tick() call inside data_task sees a valid state machine.
-     * Order: AudioBsp first (codec/I2S), then AiEngine (NVS+WS), then AiUi (LVGL widgets). */
-    if (AudioBsp_InitRecord() == ESP_OK) {
-        AudioBsp_DeinitRecord();  /* Close — only open when actually streaming */
-        ESP_LOGI(TAG, "AudioBsp probed OK");
-    } else {
-        ESP_LOGW(TAG, "AudioBsp init failed — AI voice will not work");
-    }
-    if (AiEngine_Init(ai_state_cb, ai_transcript_cb, ai_llm_result_cb) != ESP_OK) {
-        ESP_LOGE(TAG, "AiEngine init FAILED");
-    } else {
-        ESP_LOGI(TAG, "AI engine init done");
-    }
-    if (Lvgl_Lock(-1)) {
-        AiUi_Init();
-        AiUi_ShowEntry(true);  /* Show mic icon on dashboard */
-        Lvgl_Unlock();
-    }
+    /* AI engine + UI init removed (AI headers not in this checkout). */
 
     /* 12. TODO Manager */
     TodoMgr_Init();
     ESP_LOGI(TAG, "TODO Manager init done");
+
+    /* 12b. Weather: init cache (no WiFi), render cached data under LVGL lock. */
+    WeatherCache_Init();
+    s_weather_has_cached = WeatherCache_Load(&s_weather_snapshot);
+    WeatherFetch_Init();
+    if (Lvgl_Lock(-1)) {
+        WeatherUI_Init();
+        WeatherUI_SetBackCallback(weather_back_cb);
+        if (s_weather_has_cached) {
+            WeatherUI_Render(&s_weather_snapshot, true);
+        }
+        Lvgl_Unlock();
+    }
+    ESP_LOGI(TAG, "Weather: cache=%s, UI init done",
+             s_weather_has_cached ? "loaded" : "empty");
+
+    /* 12c. WiFi 管理 UI（AP/STA 状态 + 启停/重连/刷新天气入口） */
+    if (Lvgl_Lock(-1)) {
+        WifiUi_Init();
+        WifiUi_SetBackCallback(wifi_back_cb);
+        WifiUi_SetToggleApCallback(wifi_toggle_ap_cb);
+        WifiUi_SetReconnectCallback(wifi_reconnect_cb);
+        WifiUi_SetRefreshWeatherCallback(wifi_refresh_weather_cb);
+        Lvgl_Unlock();
+    }
+    ESP_LOGI(TAG, "WiFi UI init done");
 
     /* 13. TODO UI (separate screen, navigated from dashboard) */
     if (Lvgl_Lock(-1)) {
@@ -625,25 +904,45 @@ extern "C" void app_main(void)
      * (~3.7KB of locals) — calling it from app_main here would overflow
      * the main task stack and corrupt FreeRTOS internals. */
 
-    /* 14. WiFi AP + Web Server */
+    /* 13b. Pet UI (default screen on cold boot) */
+    if (Lvgl_Lock(-1)) {
+        PetUi_Init();
+        PetUi_SetBackCallback(pet_back_cb);
+        Lvgl_Unlock();
+    }
+    ESP_LOGI(TAG, "Pet UI init done");
+
+    /* 14. WiFi AP + Web Server
+     * STA WiFi is initialized inline above (step 7). The HTTP server now
+     * follows STA connectivity — data_task starts it once STA is up, so the
+     * web API is reachable without long-pressing BOOT. The AP hotspot
+     * remains BOOT-long-press-gated for on-device provisioning. */
     WifiAp_Init();
     TodoWeb_Init();
-    s_wifi_lazy_inited = true;
+    s_wifi_lazy_inited = true;   /* STA already inited inline; AP/Web init done */
+    s_web_want_running = true;   /* data_task will start the server when STA connects */
     ESP_LOGI(TAG, "WiFi AP + Web Server init done");
 
     /* 11. Data collection task (Core 0, priority 3).
      * MUST start after TimerEngine_Init — its tick=0 loop calls
      * TimerEngine_GetPomodoro(), which takes s_mutex; if the engine
-     * isn't up yet s_mutex is NULL and xSemaphoreTake asserts. */
-    xTaskCreatePinnedToCore(data_task, "data", 7 * 1024, nullptr, 3, &s_data_task_handle, 0);
+     * isn't up yet s_mutex is NULL and xSemaphoreTake asserts.
+     * Stack sized for mbedTLS HTTPS handshake (~30KB) inside WeatherFetch_Update. */
+    xTaskCreatePinnedToCore(data_task, "data", 12 * 1024, nullptr, 3, &s_data_task_handle, 0);
 
     /* 15. BOOT key detection task */
     xTaskCreatePinnedToCore(boot_key_task, "boot_key", 4 * 1024, nullptr, 5, &s_boot_key_task_handle, 1);
     ESP_LOGI(TAG, "BOOT key task started");
 
     /* 16. PWR key double-click detection task */
-    xTaskCreatePinnedToCore(pwr_key_task, "pwr_key", 3 * 1024, nullptr, 5, nullptr, 1);
+    xTaskCreatePinnedToCore(pwr_key_task, "pwr_key", 3 * 1024, nullptr, 5, &s_pwr_key_task_handle, 1);
     ESP_LOGI(TAG, "PWR key task started");
+
+    /* 17. Default screen: pet page (screen-saver style home) */
+    if (Lvgl_Lock(-1)) {
+        ui_switch_page(PAGE_PET);
+        Lvgl_Unlock();
+    }
 
     ESP_LOGI(TAG, "=== All tasks started ===");
 }

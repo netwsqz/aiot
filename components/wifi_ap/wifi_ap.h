@@ -27,6 +27,10 @@ bool WifiAp_IsActive(void);
 void WifiAp_ResetTimeout(void);
 void WifiAp_SetStateCallback(wifi_ap_state_cb_t cb);
 
+/* 当前连接到 AP 热点的站点数（基于 WIFI_EVENT_AP_STACONNECTED /
+ * AP_STADISCONNECTED 计数，AP 未开启时返回 0）。 */
+int WifiAp_GetStaCount(void);
+
 #ifdef __cplusplus
 }
 #endif

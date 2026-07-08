@@ -53,47 +53,12 @@ static lv_obj_t *s_task_page_label = NULL;
 static lv_obj_t *s_task_prev_btn = NULL;
 static lv_obj_t *s_task_next_btn = NULL;
 
-/* Back button callback */
-static void back_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    if (s_current_page == TODO_PAGE_TASKS) {
-        /* In tasks page → go back to lists */
-        TodoUi_ShowPage(TODO_PAGE_LISTS, NULL);
-    } else if (s_back_cb) {
-        /* In lists page → go back to dashboard */
-        s_back_cb();
-    }
-}
+/* ---- Pagination helpers ---- */
 
-/* Create a reusable back button */
-static lv_obj_t *create_back_btn(lv_obj_t *parent)
-{
-    lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_set_size(btn, 40, 32);
-    lv_obj_set_pos(btn, 4, 4);
-    lv_obj_set_style_bg_color(btn, lv_color_white(), 0);
-    lv_obj_set_style_border_width(btn, 0, 0);
-    lv_obj_set_style_shadow_width(btn, 0, 0);
-    lv_obj_set_style_pad_all(btn, 0, 0);
-    lv_obj_add_event_cb(btn, back_btn_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *lbl = lv_label_create(btn);
-    lv_label_set_text(lbl, LV_SYMBOL_LEFT);
-    lv_obj_set_style_text_color(lbl, lv_color_black(), 0);
-    /* LV_SYMBOL_LEFT is a FontAwesome glyph (U+F053) — chinese_14 has no
-     * symbol range, so use Montserrat 14 which bundles the symbols. */
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
-    lv_obj_center(lbl);
-
-    return btn;
-}
-
-/* Swipe gesture on todo screen → go back */
+/* Swipe gesture on todo screen → go back (left-to-right swipe = back) */
 static void swipe_gesture_cb(lv_event_t *e)
 {
     lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
-    /* User swipes from left to right (LV_DIR_RIGHT) = go back */
     if (dir == LV_DIR_RIGHT) {
         if (s_current_page == TODO_PAGE_TASKS) {
             TodoUi_ShowPage(TODO_PAGE_LISTS, NULL);
@@ -102,8 +67,6 @@ static void swipe_gesture_cb(lv_event_t *e)
         }
     }
 }
-
-/* ---- Pagination helpers ---- */
 
 static void list_prev_cb(lv_event_t *e) { (void)e; if (s_list_page > 0) { s_list_page--; refresh_lists_page(); } }
 static void list_next_cb(lv_event_t *e) { (void)e; uint8_t total = (s_list_total + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE; if (s_list_page + 1 < total) { s_list_page++; refresh_lists_page(); } }
@@ -193,18 +156,19 @@ static void create_lists_page(lv_obj_t *parent)
     lv_obj_set_style_radius(s_lists_page, 0, 0);
     lv_obj_set_style_pad_all(s_lists_page, 0, 0);
 
-    /* Back button */
-    create_back_btn(s_lists_page);
-
+    /* Title row: centered, full-width — no back button, swipe to go back */
     s_list_title = lv_label_create(s_lists_page);
-    lv_obj_set_pos(s_list_title, 48, 10);
+    lv_obj_set_pos(s_list_title, 0, 10);
+    lv_obj_set_size(s_list_title, 200, 16);
     lv_label_set_text(s_list_title, "My Lists");
     lv_obj_set_style_text_font(s_list_title, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(s_list_title, lv_color_black(), 0);
+    lv_obj_set_style_text_align(s_list_title, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_decor(s_list_title, LV_TEXT_DECOR_UNDERLINE, 0);
 
     s_list_container = lv_obj_create(s_lists_page);
-    lv_obj_set_size(s_list_container, 196, 136);
-    lv_obj_set_pos(s_list_container, 2, 34);
+    lv_obj_set_size(s_list_container, 196, 140);
+    lv_obj_set_pos(s_list_container, 2, 30);
     lv_obj_set_style_bg_opa(s_list_container, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_list_container, 0, 0);
     lv_obj_set_style_pad_all(s_list_container, 2, 0);
@@ -232,17 +196,18 @@ static void create_tasks_page(lv_obj_t *parent)
     lv_obj_set_style_radius(s_tasks_page, 0, 0);
     lv_obj_set_style_pad_all(s_tasks_page, 0, 0);
 
-    /* Back button */
-    create_back_btn(s_tasks_page);
-
+    /* Title row: centered, full-width — no back button, swipe to go back */
     s_task_title = lv_label_create(s_tasks_page);
-    lv_obj_set_pos(s_task_title, 48, 10);
+    lv_obj_set_pos(s_task_title, 0, 10);
+    lv_obj_set_size(s_task_title, 200, 16);
     lv_label_set_text(s_task_title, "Tasks");
     lv_obj_set_style_text_font(s_task_title, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(s_task_title, lv_color_black(), 0);
+    lv_obj_set_style_text_align(s_task_title, LV_TEXT_ALIGN_CENTER, 0);
 
     s_task_container = lv_obj_create(s_tasks_page);
-    lv_obj_set_size(s_task_container, 196, 136);
-    lv_obj_set_pos(s_task_container, 2, 34);
+    lv_obj_set_size(s_task_container, 196, 140);
+    lv_obj_set_pos(s_task_container, 2, 30);
     lv_obj_set_style_bg_opa(s_task_container, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_task_container, 0, 0);
     lv_obj_set_style_pad_all(s_task_container, 2, 0);

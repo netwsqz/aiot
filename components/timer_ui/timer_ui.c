@@ -53,38 +53,14 @@ static const uint32_t REM_PRESETS[6]   = {5, 10, 15, 30, 45, 60};
 static void refresh_pomodoro_page(void);
 static void refresh_reminder_page(void);
 
-/* ============ 通用：返回按钮 + 手势（仿 todo_ui） ============ */
-static void back_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    if (s_current_page == TIMER_PAGE_POMODORO || s_current_page == TIMER_PAGE_REMINDER)
-        TimerUi_ShowPage(TIMER_PAGE_TOOLS);
-    else if (s_back_cb) s_back_cb();
-}
-
+/* ============ 通用：手势返回（无返回按钮，仿 todo_ui 新版） ============ */
 static void swipe_cb(lv_event_t *e)
 {
     lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
-    if (dir == LV_DIR_RIGHT) back_btn_cb(e);
-}
-
-static lv_obj_t *create_back_btn(lv_obj_t *parent)
-{
-    lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_set_size(btn, 40, 32);
-    lv_obj_set_pos(btn, 4, 4);
-    lv_obj_set_style_bg_color(btn, lv_color_white(), 0);
-    lv_obj_set_style_border_width(btn, 0, 0);
-    lv_obj_set_style_shadow_width(btn, 0, 0);
-    lv_obj_set_style_pad_all(btn, 0, 0);
-    lv_obj_add_event_cb(btn, back_btn_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *lbl = lv_label_create(btn);
-    lv_label_set_text(lbl, LV_SYMBOL_LEFT);
-    lv_obj_set_style_text_color(lbl, lv_color_black(), 0);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
-    lv_obj_center(lbl);
-    return btn;
+    if (dir != LV_DIR_RIGHT) return;
+    if (s_current_page == TIMER_PAGE_POMODORO || s_current_page == TIMER_PAGE_REMINDER)
+        TimerUi_ShowPage(TIMER_PAGE_TOOLS);
+    else if (s_back_cb) s_back_cb();
 }
 
 static lv_obj_t *make_page(lv_obj_t *parent)
@@ -109,13 +85,14 @@ static void tools_rem_cb(lv_event_t *e)  { (void)e; TimerUi_ShowPage(TIMER_PAGE_
 static void create_tools_page(lv_obj_t *parent)
 {
     s_tools_page = make_page(parent);
-    create_back_btn(s_tools_page);
 
     lv_obj_t *title = lv_label_create(s_tools_page);
-    lv_obj_set_pos(title, 48, 10);
+    lv_obj_set_pos(title, 0, 10);
+    lv_obj_set_size(title, 200, 16);
     lv_label_set_text(title, "时间工具");
     lv_obj_set_style_text_font(title, &lv_font_chinese_14, 0);
     lv_obj_set_style_text_color(title, lv_color_black(), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_decor(title, LV_TEXT_DECOR_UNDERLINE, 0);
 
     const char *names[2] = {"番茄钟", "定时提醒"};
@@ -123,7 +100,7 @@ static void create_tools_page(lv_obj_t *parent)
     for (int i = 0; i < 2; i++) {
         lv_obj_t *btn = lv_btn_create(s_tools_page);
         lv_obj_set_size(btn, 180, 56);
-        lv_obj_set_pos(btn, 10, 50 + i * 66);
+        lv_obj_set_pos(btn, 10, 44 + i * 66);
         lv_obj_set_style_bg_color(btn, lv_color_white(), 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_radius(btn, 4, 0);
@@ -154,19 +131,20 @@ static void pomo_cancel_cb(lv_event_t *e)
 static void create_pomo_page(lv_obj_t *parent)
 {
     s_pomo_page = make_page(parent);
-    create_back_btn(s_pomo_page);
 
     lv_obj_t *title = lv_label_create(s_pomo_page);
-    lv_obj_set_pos(title, 48, 10);
+    lv_obj_set_pos(title, 0, 10);
+    lv_obj_set_size(title, 200, 16);
     lv_label_set_text(title, "番茄钟");
     lv_obj_set_style_text_font(title, &lv_font_chinese_14, 0);
     lv_obj_set_style_text_color(title, lv_color_black(), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_decor(title, LV_TEXT_DECOR_UNDERLINE, 0);
 
     /* ---- 未运行：选时长 ---- */
     s_pomo_idle_cont = lv_obj_create(s_pomo_page);
     lv_obj_set_size(s_pomo_idle_cont, 200, 160);
-    lv_obj_set_pos(s_pomo_idle_cont, 0, 40);
+    lv_obj_set_pos(s_pomo_idle_cont, 0, 30);
     lv_obj_set_style_bg_opa(s_pomo_idle_cont, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_pomo_idle_cont, 0, 0);
     lv_obj_set_style_pad_all(s_pomo_idle_cont, 0, 0);
@@ -181,7 +159,7 @@ static void create_pomo_page(lv_obj_t *parent)
 
     for (int i = 0; i < 3; i++) {
         lv_obj_t *btn = lv_btn_create(s_pomo_idle_cont);
-        lv_obj_set_size(btn, 50, 36);
+        lv_obj_set_size(btn, 50, 40);
         lv_obj_set_pos(btn, 20 + i * 55, 36);
         lv_obj_set_style_bg_color(btn, lv_color_white(), 0);
         lv_obj_set_style_border_width(btn, 1, 0);
@@ -198,7 +176,7 @@ static void create_pomo_page(lv_obj_t *parent)
     }
 
     lv_obj_t *unit = lv_label_create(s_pomo_idle_cont);
-    lv_obj_set_pos(unit, 0, 80);
+    lv_obj_set_pos(unit, 0, 84);
     lv_obj_set_size(unit, 200, 16);
     lv_label_set_text(unit, "分钟");
     lv_obj_set_style_text_font(unit, &lv_font_chinese_14, 0);
@@ -207,7 +185,7 @@ static void create_pomo_page(lv_obj_t *parent)
     /* ---- 运行中：倒计时 + 进度条 + 取消 ---- */
     s_pomo_run_cont = lv_obj_create(s_pomo_page);
     lv_obj_set_size(s_pomo_run_cont, 200, 160);
-    lv_obj_set_pos(s_pomo_run_cont, 0, 40);
+    lv_obj_set_pos(s_pomo_run_cont, 0, 30);
     lv_obj_set_style_bg_opa(s_pomo_run_cont, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_pomo_run_cont, 0, 0);
     lv_obj_set_style_pad_all(s_pomo_run_cont, 0, 0);
@@ -240,7 +218,7 @@ static void create_pomo_page(lv_obj_t *parent)
 
     lv_obj_t *cancel = lv_btn_create(s_pomo_run_cont);
     lv_obj_set_size(cancel, 100, 30);
-    lv_obj_set_pos(cancel, 50, 92);
+    lv_obj_set_pos(cancel, 50, 96);
     lv_obj_set_style_bg_color(cancel, lv_color_white(), 0);
     lv_obj_set_style_border_width(cancel, 1, 0);
     lv_obj_set_style_radius(cancel, 4, 0);
@@ -295,19 +273,21 @@ static void rem_item_click_cb(lv_event_t *e)
 static void create_rem_page(lv_obj_t *parent)
 {
     s_rem_page = make_page(parent);
-    create_back_btn(s_rem_page);
 
     s_rem_title = lv_label_create(s_rem_page);
-    lv_obj_set_pos(s_rem_title, 48, 10);
+    lv_obj_set_pos(s_rem_title, 0, 10);
+    lv_obj_set_size(s_rem_title, 200, 16);
     lv_label_set_text(s_rem_title, "定时提醒 (0/3)");
     lv_obj_set_style_text_font(s_rem_title, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(s_rem_title, lv_color_black(), 0);
+    lv_obj_set_style_text_align(s_rem_title, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_decor(s_rem_title, LV_TEXT_DECOR_UNDERLINE, 0);
 
     /* 6 预设按钮 2x3 */
     for (int i = 0; i < 6; i++) {
         lv_obj_t *btn = lv_btn_create(s_rem_page);
-        lv_obj_set_size(btn, 55, 30);
-        lv_obj_set_pos(btn, 15 + (i % 3) * 60, 34 + (i / 3) * 36);
+        lv_obj_set_size(btn, 55, 32);
+        lv_obj_set_pos(btn, 15 + (i % 3) * 60, 34 + (i / 3) * 38);
         lv_obj_set_style_bg_color(btn, lv_color_white(), 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_radius(btn, 4, 0);
@@ -324,7 +304,7 @@ static void create_rem_page(lv_obj_t *parent)
     }
 
     lv_obj_t *hint = lv_label_create(s_rem_page);
-    lv_obj_set_pos(hint, 0, 110);
+    lv_obj_set_pos(hint, 0, 114);
     lv_obj_set_size(hint, 200, 14);
     lv_label_set_text(hint, "分钟后提醒");
     lv_obj_set_style_text_font(hint, &lv_font_chinese_14, 0);
@@ -334,7 +314,7 @@ static void create_rem_page(lv_obj_t *parent)
     /* 已挂列表 */
     s_rem_list_cont = lv_obj_create(s_rem_page);
     lv_obj_set_size(s_rem_list_cont, 190, 66);
-    lv_obj_set_pos(s_rem_list_cont, 5, 128);
+    lv_obj_set_pos(s_rem_list_cont, 5, 130);
     lv_obj_set_style_bg_opa(s_rem_list_cont, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_rem_list_cont, 0, 0);
     lv_obj_set_style_pad_all(s_rem_list_cont, 0, 0);
