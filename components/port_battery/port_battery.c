@@ -47,7 +47,12 @@ float PortBattery_GetVoltage(void)
     if (adc_oneshot_read(adc1_handle, ADC_CHANNEL_3, &adc_raw) != ESP_OK)
         return 0.0f;
 
-    adc_cali_raw_to_voltage(cali_handle, adc_raw, &voltage_mv);
+    /* adc_cali_raw_to_voltage may fail on chips that don't support the
+     * curve-fitting scheme; fall back to a rough linear estimate so the
+     * battery level is still usable instead of reading 0V. */
+    if (adc_cali_raw_to_voltage(cali_handle, adc_raw, &voltage_mv) != ESP_OK) {
+        voltage_mv = adc_raw * 3300 / 4095;
+    }
     /* Voltage divider: 2:1, so multiply by 2 */
     return 0.001f * voltage_mv * 2.0f;
 }

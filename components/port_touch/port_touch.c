@@ -47,6 +47,19 @@ void PortTouch_Init(void)
     ESP_LOGI(TAG, "FT6336 initialized");
 }
 
+void PortTouch_Deinit(void)
+{
+    /* Detach the FT6336 from the shared I2C bus. The device handle is local
+     * to this file, so i2c_master_Deinit() cannot remove it itself; if it
+     * stays attached when i2c_del_master_bus() runs, ESP-IDF's behavior is
+     * undefined (and on some revisions leaks the slot). Safe to call before
+     * Init or after a failed Init (touch_dev == NULL → no-op). */
+    if (touch_dev) {
+        i2c_master_bus_rm_device(touch_dev);
+        touch_dev = NULL;
+    }
+}
+
 uint8_t PortTouch_GetPoint(uint16_t *x, uint16_t *y)
 {
     if (!touch_dev) return 0;

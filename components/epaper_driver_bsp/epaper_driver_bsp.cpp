@@ -69,7 +69,14 @@ epaper_driver_display::epaper_driver_display(int width, int height,custom_lcd_sp
 }
 
 epaper_driver_display::~epaper_driver_display() {
-
+    /* Release the PSRAM framebuffer. The SPI bus/device are owned by the
+     * app (the constructor only adds a device handle the bus the app
+     * initialized); we don't tear those down here to avoid breaking
+     * callers that share the bus. The buffer is ours to free. */
+    if (buffer) {
+        heap_caps_free(buffer);
+        buffer = NULL;
+    }
 }
 
 void epaper_driver_display::spi_gpio_init() {

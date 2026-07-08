@@ -44,6 +44,11 @@ void i2c_master_Deinit(void)
         i2c_master_bus_rm_device(shtc3_handle);
         shtc3_handle = NULL;
     }
+    /* Touch device is owned by port_touch.c. Its handle is private, so we
+     * call PortTouch_Deinit() to detach it — done by the caller (main.cpp)
+     * BEFORE i2c_master_Deinit() to avoid i2c_del_master_bus running with
+     * an attached device whose handle this module can't see (undefined,
+     * leaks the slot). See main.cpp enter_deep_sleep(). */
     if (user_i2c_handle) {
         i2c_del_master_bus(user_i2c_handle);
         user_i2c_handle = NULL;
@@ -66,6 +71,7 @@ int i2c_write_buff(i2c_master_dev_handle_t dev_handle, int reg, uint8_t *buf, ui
         ret = i2c_master_transmit(dev_handle, buf, len, i2c_data_pdMS_TICKS);
     } else {
         pbuf = (uint8_t *)malloc(len + 1);
+        if (!pbuf) return ESP_ERR_NO_MEM;
         pbuf[0] = reg;
         for (uint8_t i = 0; i < len; i++) {
             pbuf[i + 1] = buf[i];
