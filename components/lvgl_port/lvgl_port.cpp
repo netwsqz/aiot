@@ -9,6 +9,10 @@
 #include "port_touch.h"
 
 static const char *TAG = "lvgl_port";
+/* Recursive mutex: LVGL event callbacks execute inside lvgl_handler_task,
+ * which already holds lvgl_mux. If a callback (or code it calls) invokes
+ * Lvgl_Lock() again, a plain mutex would self-deadlock. The recursive
+ * variant makes re-locking from the same task a no-op-ish increment. */
 static SemaphoreHandle_t lvgl_mux = NULL;
 static epaper_driver_display *s_epd = NULL;
 static esp_timer_handle_t s_tick_timer = NULL;
@@ -83,7 +87,7 @@ void Lvgl_SetEpd(epaper_driver_display *epd)
 
 void Lvgl_PortInit(void)
 {
-    lvgl_mux = xSemaphoreCreateMutex();
+    lvgl_mux = xSemaphoreCreateRecursiveMutex();
     assert(lvgl_mux);
 
     lv_init();
@@ -126,13 +130,16 @@ bool Lvgl_Lock(int timeout_ms)
 {
     const TickType_t ticks =
         (timeout_ms == -1) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
-    return xSemaphoreTake(lvgl_mux, ticks) == pdTRUE;
+    /* Recursive take: the LVGL handler task already holds this mutex when
+     * it dispatches event callbacks, so callbacks (and anything they call)
+     * can re-enter Lvgl_Lock without deadlocking. */
+    return xSemaphoreTakeRecursive(lvgl_mux, ticks) == pdTRUE;
 }
 
 void Lvgl_Unlock(void)
 {
     assert(lvgl_mux);
-    xSemaphoreGive(lvgl_mux);
+    xSemaphoreGiveRecursive(lvgl_mux);
 }
 
 void Lvgl_PortDeinit(void)
