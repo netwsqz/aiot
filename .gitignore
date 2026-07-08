@@ -1,5 +1,8 @@
 build/
 managed_components/
+# sdkconfig is machine-specific and may carry real WiFi/API credentials
+# (set via menuconfig). Only sdkconfig.defaults is tracked, with placeholders.
+sdkconfig
 sdkconfig.old
 *.bin
 *.elf
@@ -7,3 +10,23 @@ sdkconfig.old
 monitor_output.log
 .cache/
 .vscode/
+
+# Local debug/probe artifacts (never commit)
+_probe.*
+bmp_*.err
+bmp_*.txt
+mon.err
+mon.log
+mon.pid
+mon_crash*.txt
+*.bak
+
+# Local generated images / scratch
+*.png
+pic/
+gpt-image-*
+
+# Local planning notes / scratch docs (kept local)
+progress_weather.md
+nvs_config.csv
+scripts/_conv_meta*.txt

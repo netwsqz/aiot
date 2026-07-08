@@ -19,9 +19,11 @@ CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 
-# WiFi defaults
-CONFIG_WIFI_SSID="CMCC-fAPM"
-CONFIG_WIFI_PASSWORD="sgps6663"
+# WiFi defaults — REPLACE with your own network. Real credentials must
+# NEVER be committed: set them via `idf.py menuconfig` (Component config
+# → Wi-Fi) or a local (gitignored) sdkconfig, not here.
+CONFIG_WIFI_SSID="YOUR_SSID_HERE"
+CONFIG_WIFI_PASSWORD="YOUR_PASSWORD_HERE"
 
 # WiFi AP Support
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
