@@ -363,12 +363,18 @@ static esp_err_t load_lists_from_nvs(void)
         cJSON *jicon = cJSON_GetObjectItem(item, "icon");
         cJSON *jorder = cJSON_GetObjectItem(item, "order");
 
-        if (jid && jid->valuestring)
+        if (jid && jid->valuestring) {
             strncpy(s_lists[i].id, jid->valuestring, TODO_ID_LEN - 1);
-        if (jname && jname->valuestring)
+            s_lists[i].id[TODO_ID_LEN - 1] = '\0';
+        }
+        if (jname && jname->valuestring) {
             strncpy(s_lists[i].name, jname->valuestring, TODO_NAME_LEN - 1);
-        if (jicon && jicon->valuestring)
+            s_lists[i].name[TODO_NAME_LEN - 1] = '\0';
+        }
+        if (jicon && jicon->valuestring) {
             strncpy(s_lists[i].icon, jicon->valuestring, TODO_ICON_LEN - 1);
+            s_lists[i].icon[TODO_ICON_LEN - 1] = '\0';
+        }
         if (jorder)
             s_lists[i].order = (uint8_t)jorder->valueint;
 
@@ -454,11 +460,20 @@ static esp_err_t load_tasks_from_nvs(uint8_t list_idx)
             cJSON *jdue = cJSON_GetObjectItem(item, "due");
             cJSON *jcreated = cJSON_GetObjectItem(item, "created");
 
-            if (jid) strncpy(t->id, jid->valuestring, TODO_ID_LEN - 1);
-            if (jtext) strncpy(t->text, jtext->valuestring, TODO_TEXT_LEN - 1);
+            /* Guard against NULL valuestring: a corrupted/foreign NVS blob
+             * could store a non-string (null/number) for these fields, and
+             * strncpy(NULL,...) would crash. */
+            if (jid && jid->valuestring)
+                strncpy(t->id, jid->valuestring, TODO_ID_LEN - 1);
+            t->id[TODO_ID_LEN - 1] = '\0';
+            if (jtext && jtext->valuestring)
+                strncpy(t->text, jtext->valuestring, TODO_TEXT_LEN - 1);
+            t->text[TODO_TEXT_LEN - 1] = '\0';
             if (jdone) t->done = cJSON_IsTrue(jdone);
             if (jpri) t->priority = (uint8_t)jpri->valueint;
-            if (jdue) strncpy(t->due, jdue->valuestring, TODO_DATE_LEN - 1);
+            if (jdue && jdue->valuestring)
+                strncpy(t->due, jdue->valuestring, TODO_DATE_LEN - 1);
+            t->due[TODO_DATE_LEN - 1] = '\0';
             if (jcreated) t->created = (uint32_t)jcreated->valueint;
 
             loaded++;
