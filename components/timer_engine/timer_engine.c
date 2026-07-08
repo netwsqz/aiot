@@ -30,7 +30,12 @@ static void tick_cb(TimerHandle_t tmr)
     (void)tmr;
     int fired_count = 0;
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    /* This callback runs in the FreeRTOS timer service task. Use a
+     * non-blocking take: if a higher-priority app task (e.g. data_task)
+     * holds the mutex, blocking here with portMAX_DELAY would stall the
+     * timer daemon and freeze ALL software timers. Skipping a tick costs
+     * at most 1s of countdown drift, which is harmless. */
+    if (xSemaphoreTake(s_mutex, 0) != pdTRUE) return;
     for (int i = 0; i < TIMER_MAX_SLOTS; i++) {
         if (!s_slots[i].active) continue;
         if (s_slots[i].remaining_sec > 0) s_slots[i].remaining_sec--;
@@ -63,7 +68,10 @@ esp_err_t TimerEngine_Init(void)
         s_mutex = NULL;
         return ESP_FAIL;
     }
-    xTimerStart(s_tick_timer, 0);
+    /* Give the timer-start a small grace window instead of 0: with a 0
+     * timeout, xTimerStart silently fails if the timer-command queue is
+     * momentarily full, leaving the 1s tick never started. */
+    xTimerStart(s_tick_timer, pdMS_TO_TICKS(100));
 
     ESP_LOGI(TAG, "Init done, tick 1s");
     return ESP_OK;
@@ -245,6 +253,14 @@ esp_err_t TimerEngine_Restore(void)
         ESP_LOGI(TAG, "No persisted timer data");
         return err;
     }
+    /* Reject struct-size mismatch: a stale blob from an older layout would
+     * otherwise leave fields uninitialized / partially filled. */
+    if (len != sizeof(data)) {
+        nvs_close(nvs);
+        ESP_LOGW(TAG, "Persisted timer blob size %u != expected %u — ignoring",
+                 (unsigned)len, (unsigned)sizeof(data));
+        return ESP_ERR_INVALID_SIZE;
+    }
 
     /* One-shot: erase after reading */
     nvs_erase_key(nvs, TIMER_NVS_KEY);
@@ -276,12 +292,16 @@ esp_err_t TimerEngine_Restore(void)
         restored++;
     }
 
-    /* Recover next_id as max(id) + 1 */
+    /* Recover next_id as max(id) + 1. s_next_id is uint8_t so it wraps at
+     * 255→0; clamp to 1 to avoid handing out id 0 (TimerEngine_Cancel
+     * treats 0 as INVALID_ARG). A wraparound collision with a still-active
+     * restored id is possible in pathological cases but requires 255 ids
+     * across one sleep cycle, which is unrealistic for this 4-slot engine. */
     uint8_t max_id = 0;
     for (int i = 0; i < TIMER_MAX_SLOTS; i++) {
-        if (s_slots[i].id > max_id) max_id = s_slots[i].id;
+        if (s_slots[i].active && s_slots[i].id > max_id) max_id = s_slots[i].id;
     }
-    s_next_id = max_id + 1;
+    s_next_id = (uint8_t)(max_id + 1);
     if (s_next_id == 0) s_next_id = 1;
 
     xSemaphoreGive(s_mutex);
