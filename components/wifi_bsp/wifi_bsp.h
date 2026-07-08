@@ -40,6 +40,11 @@ esp_err_t WifiBsp_Reconnect(void);
 /** Get current SSID from NVS (or Kconfig default). Caller provides buffer. */
 esp_err_t WifiBsp_GetSsid(char *buf, size_t buf_len);
 
+/* 获取当前 STA 拿到的 IPv4 地址（点分十进制字符串，如 "192.168.1.10"）。
+ * 未连接 / 未拿到 IP 时返回 ESP_ERR_INVALID_STATE，buf 仍以 '\0' 结尾。
+ * buf_len 建议 >= 16。 */
+esp_err_t WifiBsp_GetIp(char *buf, size_t buf_len);
+
 #ifdef __cplusplus
 }
 #endif

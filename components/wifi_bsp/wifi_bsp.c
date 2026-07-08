@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
 
 static const char *TAG = "wifi";
 
@@ -21,9 +22,24 @@ static const char *TAG = "wifi";
 #define WIFI_FAIL_BIT       BIT1
 
 static EventGroupHandle_t s_wifi_event_group;
-static bool s_connected = false;
+/* s_connected is read from data_task / HTTP handlers / boot_key_task and
+ * written from the wifi event-handler task. On the dual-core ESP32-S3 a
+ * plain bool has no ordering/visibility guarantee; mark volatile so the
+ * compiler doesn't cache it across the read sites. (wifi_ap.cpp uses
+ * std::atomic<int> for the analogous sta_count; a bare volatile is the
+ * C-friendly equivalent here and is sufficient for a single flag.) */
+static volatile bool s_connected = false;
 static int s_retry_count = 0;
 #define MAX_RETRY 5
+/* After MAX_RETRY exhausted retries, schedule a slow background reconnect
+ * so the device recovers on its own when the AP comes back / signal
+ * returns, instead of staying offline until the user presses Reconnect. */
+static esp_timer_handle_t s_reconnect_timer = NULL;
+#define AUTO_RECONNECT_DELAY_MS 30000
+
+/* STA netif 句柄 — 由 esp_netif_create_default_wifi_sta() 创建，
+ * 保存下来供 WifiBsp_GetIp() 直接查询 IP，不依赖默认 netif 假设。 */
+static esp_netif_t *s_sta_netif = NULL;
 
 /* Event handler instance handles — needed for proper unregister in Deinit */
 static esp_event_handler_instance_t s_inst_any = NULL;
@@ -43,13 +59,37 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         } else {
             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
             ESP_LOGE(TAG, "Connect failed after %d retries", MAX_RETRY);
+            /* Schedule a slow background reconnect so the device self-heals
+             * when the AP comes back or signal returns, instead of staying
+             * offline until the user opens the WiFi page and presses
+             * Reconnect. The timer is one-shot; if it fires and the AP is
+             * still down, the retries will run again and re-arm this. */
+            if (s_reconnect_timer) {
+                esp_timer_stop(s_reconnect_timer);
+                esp_timer_start_once(s_reconnect_timer, AUTO_RECONNECT_DELAY_MS * 1000);
+            }
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_connected = true;
         s_retry_count = 0;
+        if (s_reconnect_timer) esp_timer_stop(s_reconnect_timer);
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+/* Background auto-reconnect: triggered by the timer after MAX_RETRY
+ * consecutive failures. Resets the retry budget and kicks a fresh
+ * esp_wifi_connect() — the normal event-driven retry path then runs
+ * again, re-arming this timer if it fails once more. */
+static void reconnect_timer_cb(void *arg)
+{
+    (void)arg;
+    if (!s_connected) {
+        s_retry_count = 0;
+        ESP_LOGI(TAG, "Auto-reconnect attempt");
+        esp_wifi_connect();
     }
 }
 
@@ -64,12 +104,31 @@ void WifiBsp_Init(void)
         nvs_flash_init();
     }
 
+    /* esp_netif_init / event_loop_create_default are idempotent in ESP-IDF
+     * v5.x (they return ESP_ERR_INVALID_STATE on a second call). We only
+     * call Init once per cold boot, but guard anyway for clarity. */
     esp_netif_init();
     esp_event_loop_create_default();
-    esp_netif_create_default_wifi_sta();
+    s_sta_netif = esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    /* One-shot auto-reconnect timer (created lazily here, deleted in
+     * Deinit). Started from the DISCONNECTED handler after MAX_RETRY.
+     * If creation fails we simply proceed without auto-reconnect — the
+     * manual Reconnect button still works, and the event_handler guards
+     * every use of s_reconnect_timer with a NULL check. */
+    if (!s_reconnect_timer) {
+        esp_timer_create_args_t tcfg = {};
+        tcfg.callback = reconnect_timer_cb;
+        tcfg.name = "wifi_reconn";
+        esp_err_t terr = esp_timer_create(&tcfg, &s_reconnect_timer);
+        if (terr != ESP_OK) {
+            ESP_LOGW(TAG, "auto-reconnect timer create failed: %s", esp_err_to_name(terr));
+            s_reconnect_timer = NULL;
+        }
+    }
 
     esp_event_handler_instance_t inst_any, inst_ip;
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
@@ -170,7 +229,10 @@ bool WifiBsp_SyncNtpTime(void)
 
 void WifiBsp_Deinit(void)
 {
-    /* 1. Unregister event handlers before deinit to avoid dangling callbacks */
+    /* 1. Unregister event handlers FIRST — once they're gone, the
+     *    DISCONNECTED handler can no longer touch s_reconnect_timer, which
+     *    closes the race between event_handler's "if non-NULL then start"
+     *    and the timer teardown below. */
     if (s_inst_any) {
         esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_inst_any);
         s_inst_any = NULL;
@@ -180,12 +242,31 @@ void WifiBsp_Deinit(void)
         s_inst_ip = NULL;
     }
 
-    /* 2. Disconnect + stop + deinit WiFi driver */
+    /* 2. Stop + delete the auto-reconnect timer BEFORE esp_wifi_deinit,
+     *    otherwise the timer callback could fire mid-teardown and call
+     *    esp_wifi_connect() against a half-deinitialized driver. NULL the
+     *    handle after delete so any stray reader sees NULL. */
+    if (s_reconnect_timer) {
+        esp_timer_handle_t t = s_reconnect_timer;
+        s_reconnect_timer = NULL;   /* visible to any reader before delete */
+        esp_timer_stop(t);
+        esp_timer_delete(t);
+    }
+
+    /* 3. Disconnect + stop + deinit WiFi driver */
     esp_wifi_disconnect();
     esp_wifi_stop();
     esp_wifi_deinit();
 
-    /* 3. Free event group */
+    /* 4. Destroy the STA netif so a later Init recreates it cleanly
+     *    (otherwise the old esp_netif object leaks across Deinit/Init
+     *    cycles). */
+    if (s_sta_netif) {
+        esp_netif_destroy_default_wifi(s_sta_netif);
+        s_sta_netif = NULL;
+    }
+
+    /* 5. Free event group */
     if (s_wifi_event_group) {
         vEventGroupDelete(s_wifi_event_group);
         s_wifi_event_group = NULL;
@@ -199,6 +280,13 @@ void WifiBsp_Deinit(void)
 esp_err_t WifiBsp_SetCredentials(const char *ssid, const char *password)
 {
     if (!ssid || strlen(ssid) == 0) return ESP_ERR_INVALID_ARG;
+    /* Bound the inputs so the values we persist into NVS actually fit the
+     * wifi_config_t fields that load them later. sta.ssid is 32 bytes
+     * total (incl. NUL) → 31 usable chars; .password is 64 total → 63.
+     * Without this, oversized values are stored and then silently fail to
+     * load back into the smaller stack buffers in Reconnect(). */
+    if (strlen(ssid) > 31) return ESP_ERR_INVALID_ARG;
+    if (password && strlen(password) > 63) return ESP_ERR_INVALID_ARG;
 
     nvs_handle_t nvs;
     esp_err_t err = nvs_open("wifi", NVS_READWRITE, &nvs);
@@ -271,5 +359,37 @@ esp_err_t WifiBsp_GetSsid(char *buf, size_t buf_len)
     /* Fallback to Kconfig default */
     strncpy(buf, CONFIG_WIFI_SSID, buf_len - 1);
     buf[buf_len - 1] = '\0';
+    return ESP_OK;
+}
+
+esp_err_t WifiBsp_GetIp(char *buf, size_t buf_len)
+{
+    if (!buf || buf_len == 0) return ESP_ERR_INVALID_ARG;
+    buf[0] = '\0';
+
+    /* 未连接直接返回 INVALID_STATE，避免 esp_netif_get_ip_info 返回全 0 地址
+     * 被格式化成 "0.0.0.0"。 */
+    if (!s_connected) return ESP_ERR_INVALID_STATE;
+
+    /* 用 esp_netif_get_default netif 拿 STA 的 IP_INFO。
+     * STA netif 在 WifiBsp_Init 里由 esp_netif_create_default_wifi_sta() 创建，
+     * 是默认 netif，esp_netif_get_ip_info_by_index 也行，这里走通用接口。 */
+    esp_netif_t *netif = s_sta_netif;
+    if (!netif) return ESP_FAIL;
+
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(netif, &ip_info) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
+    /* ip4_addr_get_u32 拿到主机序的 32 位地址；逐字节拆解成点分十进制。
+     * 不用 IP2STR/IPSTR 是因为它们面向 ip4_addr_t 结构且宏展开复杂，
+     * 这里直接按字节格式化更直观、可移植。 */
+    uint32_t ip = ip_info.ip.addr;
+    snprintf(buf, buf_len, "%u.%u.%u.%u",
+             (unsigned)(ip & 0xFF),
+             (unsigned)((ip >> 8) & 0xFF),
+             (unsigned)((ip >> 16) & 0xFF),
+             (unsigned)((ip >> 24) & 0xFF));
     return ESP_OK;
 }
