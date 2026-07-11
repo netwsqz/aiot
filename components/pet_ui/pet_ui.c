@@ -6,13 +6,11 @@
 #include "timer_engine.h"
 #include "port_rtc.h"
 #include "port_battery.h"
+#include "font_cn.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
-
-/* ui.h 拉了 weather_fetch.h 等传递依赖，pet_ui 不需要，故用前向声明 + PAGE 值常量
- * 直接调 ui_switch_page，避免让 pet_ui 依赖 weather_fetch。PAGE_TODO_LISTS=1 (见 ui.h)。*/
-extern void ui_switch_page(int page);
-#define PET_PAGE_TODO_LISTS 1
+#include "esp_random.h"
+#include "esp_timer.h"
 
 static const char *TAG = "pet_ui";
 
@@ -26,11 +24,14 @@ static const char *TAG = "pet_ui";
 /* ──────────────────────────────────────────────────────────────
  * 像素字模（192×192 1bpp，行优先，每行 24 字节，MSB=最左像素，1=黑前景）
  *
- * 6 个表情全部来自 pic 目录下的 PNG，经 scripts/png_to_pet_bitmap.py 缩放
+ * 原 6 个表情来自 pic 目录下的 PNG，经 scripts/png_to_pet_bitmap.py 缩放
  * 192×192 + 50% 阈值量化，再由 scripts/inject_bitmaps.py 注入。
- * 顺序必须与 pet_ui.h 的 pet_state_t 枚举一致。
+ *
+ * v1 新增的 GREETING/CELEBRATE/REST/POKE 暂复用 HAPPY/SLEEP 位图，
+ * 靠对白气泡区分；用户后续补 PNG 后把 s_bitmap_for[] 改成独立位图即可。
  * ────────────────────────────────────────────────────────────── */
-static const uint8_t s_pet_bitmap[PET_STATE_COUNT][PET_H * PET_ROW_BYTES] = {
+#define PET_BMP_COUNT 6   /* 已有独立位图数（原 6 态）*/
+static const uint8_t s_pet_bitmap[PET_BMP_COUNT][PET_H * PET_ROW_BYTES] = {
     /* HAPPY */
     {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1207,6 +1208,53 @@ static lv_color32_t *s_canvas_buf = NULL;
 static pet_state_t s_cur_state = PET_STATE_HAPPY;
 static void (*s_back_cb)(void) = NULL;
 
+/* v1 新增状态（GREETING/CELEBRATE/REST/POKE）暂无独立位图，复用已有 6 态之一。
+ * 用户补 PNG 后改这张表即可指向 PET_BMP_COUNT 之外的新位图。*/
+static const uint8_t s_bitmap_for[PET_STATE_COUNT] = {
+    [PET_STATE_HAPPY]    = 0,  /* HAPPY */
+    [PET_STATE_BUSY]     = 1,  /* BUSY */
+    [PET_STATE_ANXIOUS]  = 2,  /* ANXIOUS */
+    [PET_STATE_FOCUS]    = 3,  /* FOCUS */
+    [PET_STATE_LOW_BATT] = 4,  /* LOW_BATT */
+    [PET_STATE_SLEEP]    = 5,  /* SLEEP */
+    [PET_STATE_GREETING] = 0,  /* 复用 HAPPY */
+    [PET_STATE_CELEBRATE]= 0,  /* 复用 HAPPY */
+    [PET_STATE_REST]     = 5,  /* 复用 SLEEP（犯困）*/
+    [PET_STATE_POKE]     = 0,  /* 复用 HAPPY */
+};
+
+/* ── 对白表：每状态 4 句，≤14 字（200px/14px）。NULL 表示该状态不显示气泡。── */
+static const char *const s_lines[PET_STATE_COUNT][4] = {
+    [PET_STATE_HAPPY]    = { NULL },                       /* 默认不说话 */
+    [PET_STATE_BUSY]     = { "还有几件事没做完", "慢慢来，别急", "今天进度不错", "记得喝水" },
+    [PET_STATE_ANXIOUS]  = { "事情有点多啊…", "先挑一件开始", "深呼吸，能搞定", "要不要列个清单" },
+    [PET_STATE_FOCUS]    = { "专注模式，加油", "别看我，快干活", "番茄计时中", "心流就绪" },
+    [PET_STATE_LOW_BATT] = { "我快没电了…", "记得给我充电", "电量告急", "撑不住了" },
+    [PET_STATE_SLEEP]    = { "Zzz…", "好困…", "晚安", "梦里见" },
+    [PET_STATE_GREETING] = { "早上好！", "新的一天，冲", "晚上好", "今天辛苦啦" },
+    [PET_STATE_CELEBRATE]= { "全搞定啦！", "太棒了！", "任务清空！", "可以休息了" },
+    [PET_STATE_REST]     = { "坐太久啦，动一动", "起来喝口水", "伸个懒腰吧", "该活动一下了" },
+    [PET_STATE_POKE]     = { "嘿嘿，痒", "别戳啦", "再摸就生气了", "舒服~" },
+};
+
+/* ── 气泡 UI：8s 自动隐藏 ── */
+static lv_obj_t *s_bubble = NULL;
+static lv_timer_t *s_bubble_timer = NULL;     /* 8s one-shot 隐藏 */
+static lv_timer_t *s_sleep_zzz_timer = NULL;  /* SLEEP 90s 周期 Zzz */
+
+/* ── POKE 屏蔽 Refresh：长按撸期间不让 compute_state 覆盖 ── */
+static int64_t s_poke_until_us = 0;            /* 0 表示未在 POKE */
+
+/* ── 久坐计时：每次 Refresh/触摸更新 ── */
+static int64_t s_last_active_us = 0;
+#define PET_REST_THRESHOLD_US  (50LL * 60 * 1000000)  /* 50 min */
+
+/* ── GREETING 去重：记录本唤醒周期已问候的小时，跨小时才再次问候 ── */
+static int s_greet_done_hour = -1;
+
+/* ── CELEBRATE 记忆：上次未完成数 ── */
+static int s_prev_undone = -1;
+
 /* ── 把 1bpp 字模画到 canvas ──
  * 用 ARGB8888 canvas（每像素 4 字节），避开 LVGL v9 I1 索引色 canvas 的
  * stride/对齐坑。逐像素直接写 0xFFFFFFFF(白) / 0xFF000000(黑)。
@@ -1235,24 +1283,103 @@ static void apply_state(pet_state_t s)
 {
     if (s >= PET_STATE_COUNT) s = PET_STATE_HAPPY;
     s_cur_state = s;
-    draw_bitmap(s_pet_bitmap[s]);
+    draw_bitmap(s_pet_bitmap[s_bitmap_for[s]]);
 }
 
-/* ── 点触交互：单击 → dashboard，长按 → TODO ── */
+/* ── 气泡显隐 ── */
+static void bubble_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (s_bubble) lv_obj_add_flag(s_bubble, LV_OBJ_FLAG_HIDDEN);
+    s_bubble_timer = NULL;
+}
+
+/* 显示对白气泡并启动 8s 倒计时隐藏。文本为空/NULL 则直接隐藏。*/
+static void bubble_show(const char *text)
+{
+    if (!s_bubble) return;
+    if (s_bubble_timer) {
+        lv_timer_del(s_bubble_timer);
+        s_bubble_timer = NULL;
+    }
+    if (text == NULL || text[0] == '\0') {
+        lv_obj_add_flag(s_bubble, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_label_set_text(s_bubble, text);
+    lv_obj_clear_flag(s_bubble, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_invalidate(s_bubble);
+    s_bubble_timer = lv_timer_create(bubble_timer_cb, 8000, NULL);
+    lv_timer_set_repeat_count(s_bubble_timer, 1);
+}
+
+/* 从状态对白表里随机选一句；该状态无对白返回 NULL。*/
+static const char *pick_line(pet_state_t s)
+{
+    if (s >= PET_STATE_COUNT) return NULL;
+    const char *const *row = s_lines[s];
+    int cnt = 0;
+    while (cnt < 4 && row[cnt] != NULL) cnt++;
+    if (cnt == 0) return NULL;
+    return row[esp_random() % cnt];
+}
+
+/* SLEEP 周期 Zzz：每 90s 冒一句睡梦对白（复用气泡），8s 后隐藏。*/
+static void sleep_zzz_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (s_cur_state != PET_STATE_SLEEP) return;
+    bubble_show(pick_line(PET_STATE_SLEEP));
+}
+
+/* 切换状态时统一管理 SLEEP Zzz timer 生命周期，避免泄露。*/
+static void update_sleep_timer(pet_state_t s)
+{
+    if (s == PET_STATE_SLEEP) {
+        if (s_sleep_zzz_timer == NULL) {
+            s_sleep_zzz_timer = lv_timer_create(sleep_zzz_cb, 90000, NULL);
+        }
+    } else {
+        if (s_sleep_zzz_timer != NULL) {
+            lv_timer_del(s_sleep_zzz_timer);
+            s_sleep_zzz_timer = NULL;
+        }
+    }
+}
+
+/* 对外/对内统一的状态应用入口：画位图 + 气泡 + Zzz timer。*/
+static void enter_state(pet_state_t s, bool show_bubble)
+{
+    apply_state(s);
+    update_sleep_timer(s);
+    if (show_bubble) {
+        bubble_show(pick_line(s));
+    } else if (s != PET_STATE_SLEEP) {
+        /* SLEEP 的 Zzz 由 timer 周期触发；其余不显示气泡时清掉。*/
+        bubble_show(NULL);
+    }
+}
+
+/* ── 点触交互：单击 → dashboard，长按 → 撸 ── */
 static void screen_clicked_cb(lv_event_t *e)
 {
     (void)e;
+    s_last_active_us = esp_timer_get_time();
     if (s_back_cb) s_back_cb();   /* main.cpp 设为 ui_switch_page(PAGE_DASHBOARD) */
 }
 
 static void screen_longpress_cb(lv_event_t *e)
 {
     (void)e;
-    /* 长按 → 跳 TODO 列表页 */
-    ui_switch_page(PET_PAGE_TODO_LISTS);
+    s_last_active_us = esp_timer_get_time();
+    /* 长按 → 撸：切 POKE 状态 + 对白，3s 后恢复 compute_state。*/
+    s_poke_until_us = esp_timer_get_time() + (3 * 1000000LL);
+    enter_state(PET_STATE_POKE, true);
 }
 
-/* ── 聚合设备状态算表情 ── */
+/* ── 聚合设备状态算表情 ──
+ * 优先级（高→低）：SLEEP > LOW_BATT > GREETING > CELEBRATE > REST > FOCUS
+ *                                  > ANXIOUS > BUSY > HAPPY */
 static pet_state_t compute_state(void)
 {
     /* 1. 夜间优先 */
@@ -1267,7 +1394,44 @@ static pet_state_t compute_state(void)
         return PET_STATE_LOW_BATT;
     }
 
-    /* 3. 计时器运行中（番茄钟或提醒）*/
+    /* 3. 问候：早 6-9 / 晚 19-22，每唤醒周期每个小时只触发一次。
+     * 深睡眠唤醒后 app_main 重跑，s_greet_done_hour 初值 -1，必问候一次。*/
+    if ((t.hour >= 6 && t.hour < 9) || (t.hour >= 19 && t.hour < 22)) {
+        if (s_greet_done_hour != t.hour) {
+            s_greet_done_hour = t.hour;
+            return PET_STATE_GREETING;
+        }
+    }
+
+    /* 4. TODO 数量（CELEBRATE/BUSY/ANXIOUS 共用这次扫描）*/
+    static todo_list_t lists[TODO_MAX_LISTS];
+    static todo_task_t tasks[TODO_MAX_TASKS];
+    uint8_t list_cnt = 0;
+    int undone = 0;
+    if (TodoMgr_GetLists(lists, &list_cnt) == ESP_OK) {
+        for (uint8_t i = 0; i < list_cnt; i++) {
+            uint16_t tcnt = 0;
+            if (TodoMgr_GetTasks(lists[i].id, tasks, &tcnt) != ESP_OK) continue;
+            for (uint16_t j = 0; j < tcnt; j++) {
+                if (!tasks[j].done) undone++;
+            }
+        }
+    }
+
+    /* 5. 庆祝：刚从「有未完成」变成「全部清空」*/
+    if (undone == 0 && s_prev_undone > 0) {
+        s_prev_undone = undone;
+        return PET_STATE_CELEBRATE;
+    }
+    s_prev_undone = undone;
+
+    /* 6. 久坐提醒：距上次活动 > 50min。触屏/Refresh 都会刷新 s_last_active_us。*/
+    if (s_last_active_us != 0 &&
+        (esp_timer_get_time() - s_last_active_us) > PET_REST_THRESHOLD_US) {
+        return PET_STATE_REST;
+    }
+
+    /* 7. 计时器运行中（番茄钟或提醒）*/
     timer_instance_t slots[TIMER_MAX_SLOTS];
     uint8_t slot_cnt = 0;
     if (TimerEngine_GetAll(slots, &slot_cnt) == ESP_OK) {
@@ -1278,24 +1442,24 @@ static pet_state_t compute_state(void)
         }
     }
 
-    /* 4. TODO 数量 */
-    static todo_list_t lists[TODO_MAX_LISTS];
-    static todo_task_t tasks[TODO_MAX_TASKS];
-    uint8_t list_cnt = 0;
-    if (TodoMgr_GetLists(lists, &list_cnt) == ESP_OK) {
-        int undone = 0;
-        for (uint8_t i = 0; i < list_cnt; i++) {
-            uint16_t tcnt = 0;
-            if (TodoMgr_GetTasks(lists[i].id, tasks, &tcnt) != ESP_OK) continue;
-            for (uint16_t j = 0; j < tcnt; j++) {
-                if (!tasks[j].done) undone++;
-            }
-        }
-        if (undone >= 5) return PET_STATE_ANXIOUS;
-        if (undone >= 1) return PET_STATE_BUSY;
-    }
+    /* 8. 按 TODO 数量分级 */
+    if (undone >= 5) return PET_STATE_ANXIOUS;
+    if (undone >= 1) return PET_STATE_BUSY;
 
     return PET_STATE_HAPPY;
+}
+
+/* 判定某状态是否应在对白气泡里说话。
+ * HAPPY 默认安静；SLEEP 由 Zzz timer 周期说，不在 enter_state 时立刻说。*/
+static bool state_should_speak(pet_state_t s)
+{
+    switch (s) {
+        case PET_STATE_HAPPY:
+        case PET_STATE_SLEEP:
+            return false;
+        default:
+            return true;
+    }
 }
 
 /* ──────────────────────────────────────────────────────────────
@@ -1327,11 +1491,29 @@ esp_err_t PetUi_Init(void)
     lv_canvas_set_buffer(s_canvas, s_canvas_buf, PET_W, PET_H, LV_COLOR_FORMAT_ARGB8888);
     lv_obj_set_pos(s_canvas, PET_CX, PET_CY);
 
-    /* 交互：点触返回 dashboard，长按看 TODO（无文字提示，靠操作探索）*/
+    /* 对白气泡：白底黑字 14px，盖在 canvas 最底部 24px（角色脚部，细节少）。
+     * 宽 192，居中于 canvas。8s 自动隐藏（见 bubble_show）。*/
+    s_bubble = lv_label_create(s_pet_screen);
+    lv_obj_set_width(s_bubble, PET_W);
+    lv_obj_set_height(s_bubble, 24);
+    lv_obj_set_pos(s_bubble, PET_CX, PET_CY + PET_H - 24);  /* y=172 */
+    lv_obj_set_style_bg_color(s_bubble, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_bubble, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(s_bubble, lv_color_black(), 0);
+    lv_obj_set_style_text_font(s_bubble, &lv_font_chinese_14, 0);
+    lv_obj_set_style_pad_all(s_bubble, 2, 0);
+    lv_obj_set_style_radius(s_bubble, 0, 0);
+    lv_obj_set_style_border_width(s_bubble, 0, 0);
+    lv_label_set_long_mode(s_bubble, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_bubble, "");
+    lv_obj_add_flag(s_bubble, LV_OBJ_FLAG_HIDDEN);
+
+    /* 交互：单击返回 dashboard，长按撸（POKE + 对白 3s）*/
     lv_obj_add_event_cb(s_pet_screen, screen_clicked_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_pet_screen, screen_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
 
-    apply_state(PET_STATE_HAPPY);
+    s_last_active_us = esp_timer_get_time();
+    enter_state(PET_STATE_HAPPY, false);
     ESP_LOGI(TAG, "pet_ui init done");
     return ESP_OK;
 }
@@ -1344,15 +1526,23 @@ lv_obj_t *PetUi_GetScreen(void)
 void PetUi_SetState(pet_state_t s)
 {
     if (!s_pet_screen) return;
-    apply_state(s);
+    enter_state(s, state_should_speak(s));
 }
 
 void PetUi_Refresh(void)
 {
     if (!s_pet_screen) return;
+    /* 撸（POKE）期间屏蔽自动刷新，避免被 compute_state 覆盖。*/
+    if (s_poke_until_us != 0 && esp_timer_get_time() < s_poke_until_us) {
+        return;
+    }
+    if (s_poke_until_us != 0) {
+        s_poke_until_us = 0;   /* POKE 到期，本次 Refresh 自然恢复 */
+    }
+    s_last_active_us = esp_timer_get_time();
     pet_state_t s = compute_state();
     if (s != s_cur_state) {
-        apply_state(s);
+        enter_state(s, state_should_speak(s));
     }
 }
 
