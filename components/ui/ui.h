@@ -36,6 +36,7 @@ typedef struct {
     /* Bottom-right: image placeholder */
     lv_obj_t *cont_bottom_right;
     lv_obj_t *lbl_image_placeholder;
+    lv_obj_t *img_draw_thumb;   /* 画板作品缩略图 canvas（100×100 ARGB8888，无作品时 hidden）*/
 
     /* Bottom-right: pomodoro mini display (shown when a pomodoro is running) */
     lv_obj_t *cont_timer_mini;
@@ -74,6 +75,7 @@ typedef enum {
     PAGE_WEATHER,
     PAGE_WIFI_MGMT,
     PAGE_PET,
+    PAGE_DRAW,
 } ui_page_t;
 
 void ui_switch_page(ui_page_t page);

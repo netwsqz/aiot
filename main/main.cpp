@@ -27,6 +27,7 @@
 #include "weather_ui.h"
 #include "wifi_ui.h"
 #include "pet_ui.h"
+#include "draw_ui.h"
 #include "esp_sleep.h"
 #include "driver/rtc_io.h"
 #include "nvs_flash.h"
@@ -157,6 +158,13 @@ static void pet_back_cb(void)
     ui_switch_page(PAGE_DASHBOARD);
 }
 
+/* Draw page back callback: 退出画板前 DrawUi 自行保存笔迹，这里只导航。
+ * 运行在 LVGL 锁内（由 DrawUi 的 CLICKED 回调触发）。*/
+static void draw_back_cb(void)
+{
+    ui_switch_page(PAGE_DASHBOARD);
+}
+
 /* Weather page refresh callback: runs inside LVGL lock (button click).
  * Just sets the refresh flag — the actual HTTPS fetch happens in data_task
  * on the next 1s tick, OUTSIDE the LVGL lock (TLS + JSON parse must not
@@ -258,15 +266,23 @@ static void boot_key_task(void *arg)
             if (press_start != 0 && !long_handled) {
                 TickType_t held = xTaskGetTickCount() - press_start;
                 if (held < pdMS_TO_TICKS(300)) {
-                    /* Short press: cycle screens */
+                    /* Short press: cycle screens — except when on the draw
+                     * board, where BOOT short-press = save & exit to dashboard.
+                     * (画板不用长按退出——LVGL LONG_PRESSED 与画线冲突，
+                     * 见 DrawUi_SaveAndExit 注释。) */
                     if (Lvgl_Lock(500)) {
-                        ui_page_t cur = ui_get_current_page();
-                        if (cur == PAGE_PET) {
-                            ui_switch_page(PAGE_DASHBOARD);
-                        } else if (cur == PAGE_DASHBOARD) {
-                            ui_switch_page(PAGE_TODO_LISTS);
+                        if (ui_get_current_page() == PAGE_DRAW) {
+                            DrawUi_SaveAndExit();
+                            DrawUi_RestoreIndevPeriod();
                         } else {
-                            ui_switch_page(PAGE_PET);
+                            ui_page_t cur = ui_get_current_page();
+                            if (cur == PAGE_PET) {
+                                ui_switch_page(PAGE_DASHBOARD);
+                            } else if (cur == PAGE_DASHBOARD) {
+                                ui_switch_page(PAGE_TODO_LISTS);
+                            } else {
+                                ui_switch_page(PAGE_PET);
+                            }
                         }
                         Lvgl_Unlock();
                     }
@@ -739,6 +755,13 @@ extern "C" void app_main(void)
             Lvgl_Unlock();
         }
 
+        /* Draw UI (画板，右下角入口) — 唤醒路径同样注册 */
+        if (Lvgl_Lock(-1)) {
+            DrawUi_Init();
+            DrawUi_SetBackCallback(draw_back_cb);
+            Lvgl_Unlock();
+        }
+
         /* WiFi AP + Web deferred — lazy-init on BOOT long-press */
 
         /* Start data task */
@@ -911,6 +934,14 @@ extern "C" void app_main(void)
         Lvgl_Unlock();
     }
     ESP_LOGI(TAG, "Pet UI init done");
+
+    /* 13c. Draw UI (画板，右下角入口) */
+    if (Lvgl_Lock(-1)) {
+        DrawUi_Init();
+        DrawUi_SetBackCallback(draw_back_cb);
+        Lvgl_Unlock();
+    }
+    ESP_LOGI(TAG, "Draw UI init done");
 
     /* 14. WiFi AP + Web Server
      * STA WiFi is initialized inline above (step 7). The HTTP server now

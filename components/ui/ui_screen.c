@@ -8,6 +8,8 @@
 #include "weather_ui.h"
 #include "wifi_ui.h"
 #include "pet_ui.h"
+#include "draw_ui.h"
+#include "esp_heap_caps.h"
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -20,6 +22,7 @@ static lv_obj_t *s_timer_screen = NULL;
 static lv_obj_t *s_weather_screen = NULL;
 static lv_obj_t *s_wifi_screen = NULL;
 static lv_obj_t *s_pet_screen = NULL;
+static lv_obj_t *s_draw_screen = NULL;
 
 /* ── Helper: clean container (no border, no scroll, transparent) ── */
 static lv_obj_t *create_quadrant(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
@@ -165,9 +168,56 @@ static void setup_bottom_left(lv_ui *ui)
 }
 
 /* ── Bottom-right: Image placeholder ───────────────── */
+/* 点击右下角 → 进入画板。widget 句柄仍叫 lbl_image_placeholder
+ * （保留 ui 结构体字段名，避免改动外层），实际是文字占位；缩略图由独立的
+ * img_draw_thumb canvas 承载。pomodoro 运行时二者都隐藏（见 ui_update_timer_mini）。*/
+static void draw_entry_click_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_switch_page(PAGE_DRAW);
+}
+
+/* 缩略图尺寸（与 draw_ui 的 THUMB_W/H 对应：右下角占位区 100×100）*/
+#define UI_THUMB_W 100
+#define UI_THUMB_H 100
+
+/* 缩略图 canvas buffer（100×100 ARGB8888 = 40KB，PSRAM）。static 全局唯一。*/
+static lv_color32_t *s_thumb_buf = NULL;
+
+/* 把已保存的画板作品降采样渲染到右下角缩略图 canvas；无作品则显 'Image' 文字。
+ * 须在 LVGL 锁内调用。pomodoro 运行时缩略图 canvas 隐藏，本函数仍可安全调用。*/
+static void draw_placeholder_refresh(lv_ui *ui)
+{
+    if (DrawUi_HasSavedImage() && s_thumb_buf &&
+        DrawUi_RenderThumbnail((uint8_t *)s_thumb_buf, UI_THUMB_W * UI_THUMB_H * 4)) {
+        lv_obj_clear_flag(ui->img_draw_thumb, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(ui->img_draw_thumb);
+        lv_label_set_text(ui->lbl_image_placeholder, "");
+    } else {
+        lv_obj_add_flag(ui->img_draw_thumb, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(ui->lbl_image_placeholder, "Image");
+    }
+}
+
 static void setup_bottom_right(lv_ui *ui)
 {
     ui->cont_bottom_right = create_quadrant(ui->screen, 100, 100, 100, 100);
+
+    /* 整个右下角象限可点击 → 画板 */
+    lv_obj_add_flag(ui->cont_bottom_right, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(ui->cont_bottom_right, draw_entry_click_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 缩略图 canvas（100×100，铺满象限）。懒分配 PSRAM。
+     * 无作品时 hidden，显示下方 'Image' 文字。*/
+    s_thumb_buf = (lv_color32_t *)heap_caps_malloc(
+        UI_THUMB_W * UI_THUMB_H * sizeof(lv_color32_t), MALLOC_CAP_SPIRAM);
+    ui->img_draw_thumb = lv_canvas_create(ui->cont_bottom_right);
+    if (s_thumb_buf) {
+        lv_canvas_set_buffer(ui->img_draw_thumb, s_thumb_buf, UI_THUMB_W, UI_THUMB_H,
+                             LV_COLOR_FORMAT_ARGB8888);
+    }
+    lv_obj_set_pos(ui->img_draw_thumb, 0, 0);
+    lv_obj_add_flag(ui->img_draw_thumb, LV_OBJ_FLAG_HIDDEN);
 
     ui->lbl_image_placeholder = lv_label_create(ui->cont_bottom_right);
     lv_obj_set_pos(ui->lbl_image_placeholder, 0, 40);
@@ -236,6 +286,7 @@ void ui_init(void)
     setup_top_right(&ui);
     setup_bottom_left(&ui);
     setup_bottom_right(&ui);
+    draw_placeholder_refresh(&ui);   /* 有作品则隐藏占位文字 */
 
     lv_screen_load(ui.screen);
 }
@@ -296,9 +347,12 @@ void ui_update_timer_mini(bool running, uint32_t remaining_sec, uint32_t total_s
         if (running) {
             lv_obj_clear_flag(ui.cont_timer_mini, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(ui.lbl_image_placeholder, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(ui.img_draw_thumb, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(ui.cont_timer_mini, LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(ui.lbl_image_placeholder, LV_OBJ_FLAG_HIDDEN);
+            /* pomodoro 结束后刷新占位：可能期间画板存了新图 */
+            draw_placeholder_refresh(&ui);
         }
         last_running = running;
         last_min = 0;
@@ -397,6 +451,8 @@ void ui_switch_page(ui_page_t page)
 {
     s_current_page = page;
     if (page == PAGE_DASHBOARD) {
+        /* 返回 dashboard 时刷新右下角占位：画板可能刚存了新作品 */
+        draw_placeholder_refresh(&ui);
         lv_screen_load(s_dashboard_screen);
     } else if (page == PAGE_TODO_LISTS) {
         if (!s_todo_screen) {
@@ -447,6 +503,15 @@ void ui_switch_page(ui_page_t page)
         }
         if (s_pet_screen) {
             lv_screen_load(s_pet_screen);
+        }
+    } else if (page == PAGE_DRAW) {
+        if (!s_draw_screen) {
+            s_draw_screen = DrawUi_GetScreen();
+        }
+        if (s_draw_screen) {
+            DrawUi_Enter();   /* 每次进入即清空为空白 */
+            DrawUi_SetIndevFast(lv_indev_get_next(NULL));  /* 8ms 采样，避免曲线变折线 */
+            lv_screen_load(s_draw_screen);
         }
     }
 }
