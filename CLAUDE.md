@@ -30,6 +30,24 @@ env -u MSYSTEM powershell.exe -ExecutionPolicy Bypass -Command \
 
 User's native shell: PowerShell with `E:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1` loaded.
 
+### PC LVGL sim (host UI regression, no flash)
+
+`tools/pc_sim/` compiles the firmware UI `.c` files verbatim against host SDL2 + LVGL (from `managed_components/`), so you can iterate on UI layout / page-switch / callbacks without hardware. **Not** ESP-IDF — uses host gcc (MinGW) + CMake + Ninja, so do NOT wrap it in the PowerShell/MSYSTEM dance above.
+
+```bash
+# one-time: ensure managed_components/ exists (run idf.py build once in repo root)
+cmake -S tools/pc_sim -B tools/pc_sim/build -G Ninja \
+      -DSDL2_ROOT=<SDL2-2.30.12>/x86_64-w64-mingw32
+cmake --build tools/pc_sim/build
+tools/pc_sim/build/aiot_sim.exe   # keys 1-7 switch pages, b/h/p mock data, ESC quit
+```
+
+See `tools/pc_sim/README.md` for dependencies and the full keyboard map. Sim covers UI logic only — EPD partial-refresh, SPIFFS read/write, indev timing, deep-sleep wake still need `idf.py flash`.
+
+### Verification (no host test framework)
+
+Hardware-dependent code (I2C/SPI/e-ink/audio) can't be mocked on host, so there is no unit-test / coverage toolchain. Verification = `idf.py build` (compile) + `idf.py flash` + on-device observation. `idf.py size` watches PSRAM/flash/stack budget (DIRAM is ~85% full — recheck before adding large buffers). The PC sim is the only host-side check, and only for UI.
+
 ## Architecture
 
 Three-layer component architecture, all wired in `main/main.cpp`:
@@ -41,6 +59,7 @@ Three-layer component architecture, all wired in `main/main.cpp`:
 │ Application:  todo_ui  timer_ui  todo_web       │
 │               todo_manager  timer_engine        │
 │               wifi_bsp  wifi_ap  standby_screen │
+│               pet_ui  draw_ui  weather_*        │
 ├─────────────────────────────────────────────────┤
 │ LVGL/UI:      lvgl_port  ui  font_cn           │
 ├─────────────────────────────────────────────────┤
@@ -52,24 +71,27 @@ Three-layer component architecture, all wired in `main/main.cpp`:
 
 - **BSP layer** (`*_bsp`, `port_*`): Hardware abstraction. I2C bus is shared on IO47/IO48 (addresses 0x70/0x51/0x38 don't conflict).
 - **LVGL bridge** (`lvgl_port`): Connects C++ EPD driver to LVGL flush callback. All UI updates must go through `Lvgl_Lock()`/`Lvgl_Unlock()`.
-- **Application modules** (`todo_*`, `timer_*`, `wifi_*`): Self-contained C components with `extern "C"` headers. Each owns its own LVGL screen.
+- **Application modules** (`todo_*`, `timer_*`, `wifi_*`, `pet_ui`, `draw_ui`, `weather_*`): Self-contained C components with `extern "C"` headers. Each owns its own LVGL screen.
 - **Only `main.cpp` is C++** — everything else is C or C-with-extern-C-wrapper.
 
 ### Key data flows
 
 - **TODO**: Phone → WiFi AP → HTTP REST (`todo_web`) → NVS (`todo_manager`) → LVGL screen (`todo_ui`)
 - **Timer**: Button/touch → `timer_engine` (FreeRTOS timers) → NVS persist → `timer_ui` (fullscreen alert)
+- **Pet**: `data_task` aggregates device state → `pet_ui` `compute_state()` picks one of 10 states (SLEEP>LOW_BATT>GREETING>CELEBRATE>REST>FOCUS>ANXIOUS>BUSY>HAPPY + POKE on long-press). Speech bubble auto-hides after 8s. New states (GREETING/CELEBRATE/REST/POKE) reuse HAPPY/SLEEP bitmaps via `s_bitmap_for[]` — replace entries when art is drawn.
+- **Draw**: dashboard bottom-right quadrant → `PAGE_DRAW` → `draw_ui` canvas. BOOT short-press on draw page = `DrawUi_SaveAndExit()` (NOT long-press — LVGL LONG_PRESSED conflicts with drawing). Indev sampling 33ms→8ms while on draw page.
 - **Sensors**: FreeRTOS `data_task` polls SHTC3/RTC/Battery → updates `ui` dashboard
-- **Deep sleep**: Double-PWR → `esp_deep_sleep_start()` → wake re-runs `app_main()` (different init path, skips WiFi)
+- **Deep sleep**: Double-PWR → tear-down sequence (`app_main` steps 1-12, ~`main.cpp:347`) → `esp_deep_sleep_start()` → wake re-runs `app_main()` (different init path, skips WiFi)
 
 ### LVGL on e-ink constraints
 
-- **LVGL v9** (managed component, Kconfig — no `lv_conf.h`)
+- **LVGL v9** (managed component, Kconfig — no `lv_conf.h` on firmware; PC sim has its own `tools/pc_sim/lv_conf.h`)
 - **No animations, no shadows** — e-ink refresh is ~300ms, no partial animation possible
-- **Use `lv_font_chinese_14`** for any Chinese text (Source Han Sans SC, line_height=16px). Montserrat fonts lack CJK glyphs.
+- **Use `lv_font_chinese_14`** for any Chinese text (Source Han Sans SC, line_height=16px). Montserrat fonts lack CJK glyphs. The pet speech bubble and any CN labels must set this font explicitly.
 - **LVGL v8 vs v9 API**: This project uses LVGL v9. If referencing Waveshare V2 examples, they use LVGL v8 — `lv_obj_set_flex_gap()` is v9-only, `lv_obj_set_style_pad_column()` works in both.
 - **Partial refresh**: Must call `EPD_DisplayPartBaseImage()` before any partial update. SSD1681 LUT arrays must be complete (159 values for `WF_PARTIAL_1IN54_0`) or BUSY pin hangs.
 - **Checkbox label wrapping**: Must set `LV_LABEL_LONG_WRAP` on the internal label child (index 1) and limit width on both the checkbox and its label.
+- **ARGB8888 canvas for 1bpp patterns**: `pet_ui`/`draw_ui` use `LV_COLOR_FORMAT_ARGB8888` (4 bytes/pixel) and write `0xFFFFFFFF`/`0xFF000000` directly, to avoid LVGL v9 I1 indexed-color canvas stride/alignment pitfalls.
 
 ## Hardware Pinout (Quick Reference)
 
@@ -107,12 +129,22 @@ Full pinout and peripheral details in GPIO table below.
 ### Static ID pools for LVGL callbacks
 LVGL event `user_data` must point to memory that outlives the function call. Stack arrays die on return. Use static pools like `s_list_id_pool[TODO_MAX_LISTS][TODO_ID_LEN]` — see `todo_ui.cpp` for the pattern.
 
+### Adding a component / wiring it in
+1. `components/<name>/CMakeLists.txt` with `idf_component_register(SRCS ... INCLUDE_DIRS "." PRIV_REQUIRES ...)`.
+2. Add the component name to `main/CMakeLists.txt` `PRIV_REQUIRES`.
+3. If it owns an LVGL screen: `#include` in `main.cpp`, init in `app_main` (BOTH the normal path AND the deep-sleep wake path — wake re-runs `app_main`), register in `ui_switch_page()` dispatch (`components/ui/ui_screen.c`), add a `PAGE_<X>` enum to `ui.h`.
+4. ESP-IDF auto-discovers components under `components/` — but `PRIV_REQUIRES` is what makes `#include` resolve. Forgetting it = link error.
+
+### Orphan: `components/ai_engine/`
+`ai_engine.c` (1261 lines) is tracked but **not wired** — no `CMakeLists.txt`, not in any `PRIV_REQUIRES`, not called from `main.cpp`. It was stripped from master (stash `wip: strip ai engine`) after 15 rounds of concurrency fixes on the `feature/weather-forecast` branch. To re-enable: cherry-pick `ai_ui` + `audio_bsp` from `.worktrees/weather-feature`, add CMakeLists, add to `main/CMakeLists.txt` REQUIRES, and recheck `idf.py size` (it uses 8KB×2 task stacks + WS/HTTP; DIRAM is ~85% full). See `docs/NEXT-STEPS-2026-07.md` P1.
+
 ## Reference
 
-- Waveshare V2 examples: `V2/` (13 projects, LVGL v8 unless noted)
-- Design specs: `docs/superpowers/specs/`
-- Implementation plans: `docs/superpowers/plans/`
+- Waveshare V2 examples: `V2/` (13 projects, LVGL v8 unless noted) — reference only, not built
+- Design specs: `docs/ecc/specs/` · Implementation plans: `docs/ecc/plans/` and `.claude/plans/`
 - Web UI (standalone dev): `web_dev/index.html`
+- Roadmap / known gaps: `docs/NEXT-STEPS-2026-07.md`
+- Project rules (ESP-IDF specialization of common/cpp standards): `.claude/rules/ecc/`
 
 ---
 
