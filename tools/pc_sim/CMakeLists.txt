@@ -99,7 +99,7 @@ add_executable(aiot_sim
 )
 
 set(_COMPONENT_DIRS
-    ui pet_ui draw_ui todo_ui todo_manager timer_ui timer_engine
+    ui pet_ui draw_ui snake_ui todo_ui todo_manager timer_ui timer_engine
     weather_ui weather_fetch wifi_ui lvgl_port font_cn port_rtc port_battery)
 set(_INC_DIRS "")
 foreach(c ${_COMPONENT_DIRS})
@@ -122,11 +122,13 @@ pc_resolve(_UI_SCREEN  components/ui/ui_screen.c)
 pc_resolve(_PET_UI     components/pet_ui/pet_ui.c)
 pc_resolve(_FONT_CN    components/font_cn/lv_font_chinese_14.c)
 pc_resolve(_DRAW_UI    components/draw_ui/draw_ui.c)
+pc_resolve(_SNAKE_UI    components/snake_ui/snake_ui.c)
 target_sources(aiot_sim PRIVATE
     ${_UI_SCREEN}
     ${_PET_UI}
     ${_FONT_CN}
     ${_DRAW_UI}
+    ${_SNAKE_UI}
 )
 
 target_link_libraries(aiot_sim PRIVATE lvgl::lvgl SDL2::SDL2)

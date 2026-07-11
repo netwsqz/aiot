@@ -9,6 +9,7 @@
 #include "wifi_ui.h"
 #include "pet_ui.h"
 #include "draw_ui.h"
+#include "snake_ui.h"
 #include "esp_heap_caps.h"
 #include <inttypes.h>
 #include <stdio.h>
@@ -23,6 +24,7 @@ static lv_obj_t *s_weather_screen = NULL;
 static lv_obj_t *s_wifi_screen = NULL;
 static lv_obj_t *s_pet_screen = NULL;
 static lv_obj_t *s_draw_screen = NULL;
+static lv_obj_t *s_snake_screen = NULL;
 
 /* ── Helper: clean container (no border, no scroll, transparent) ── */
 static lv_obj_t *create_quadrant(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
@@ -177,6 +179,15 @@ static void draw_entry_click_cb(lv_event_t *e)
     ui_switch_page(PAGE_DRAW);
 }
 
+/* 长按右下角 → 进入贪吃蛇（短按仍画板，见 draw_entry_click_cb）。
+ * LVGL LONG_PRESSED 默认在 >=400ms 触发——右下角是静态占位区无其它手势冲突，
+ * 不会像画板那样与拖动画线打架，故可安全用长按。*/
+static void snake_entry_longpress_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_switch_page(PAGE_SNAKE);
+}
+
 /* 缩略图尺寸（与 draw_ui 的 THUMB_W/H 对应：右下角占位区 100×100）*/
 #define UI_THUMB_W 100
 #define UI_THUMB_H 100
@@ -203,9 +214,10 @@ static void setup_bottom_right(lv_ui *ui)
 {
     ui->cont_bottom_right = create_quadrant(ui->screen, 100, 100, 100, 100);
 
-    /* 整个右下角象限可点击 → 画板 */
+    /* 整个右下角象限：短按 → 画板，长按 → 贪吃蛇 */
     lv_obj_add_flag(ui->cont_bottom_right, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(ui->cont_bottom_right, draw_entry_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(ui->cont_bottom_right, snake_entry_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
 
     /* 缩略图 canvas（100×100，铺满象限）。懒分配 PSRAM。
      * 无作品时 hidden，显示下方 'Image' 文字。*/
@@ -512,6 +524,14 @@ void ui_switch_page(ui_page_t page)
             DrawUi_Enter();   /* 每次进入即清空为空白 */
             DrawUi_SetIndevFast(lv_indev_get_next(NULL));  /* 8ms 采样，避免曲线变折线 */
             lv_screen_load(s_draw_screen);
+        }
+    } else if (page == PAGE_SNAKE) {
+        if (!s_snake_screen) {
+            s_snake_screen = SnakeUi_GetScreen();
+        }
+        if (s_snake_screen) {
+            SnakeUi_Enter();   /* 重置新局 + 显示"点屏幕开始" */
+            lv_screen_load(s_snake_screen);
         }
     }
 }

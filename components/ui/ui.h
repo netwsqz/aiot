@@ -76,6 +76,7 @@ typedef enum {
     PAGE_WIFI_MGMT,
     PAGE_PET,
     PAGE_DRAW,
+    PAGE_SNAKE,
 } ui_page_t;
 
 void ui_switch_page(ui_page_t page);

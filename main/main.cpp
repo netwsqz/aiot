@@ -28,6 +28,7 @@
 #include "wifi_ui.h"
 #include "pet_ui.h"
 #include "draw_ui.h"
+#include "snake_ui.h"
 #include "esp_sleep.h"
 #include "driver/rtc_io.h"
 #include "nvs_flash.h"
@@ -165,6 +166,14 @@ static void draw_back_cb(void)
     ui_switch_page(PAGE_DASHBOARD);
 }
 
+/* Snake page back callback: 退出贪吃蛇。SnakeUi_Exit 停步进 timer，
+ * 由 BOOT 短按退出路径在调 back_cb 前先调（见 boot_key_task）。
+ * 运行在 LVGL 锁内。*/
+static void snake_back_cb(void)
+{
+    ui_switch_page(PAGE_DASHBOARD);
+}
+
 /* Weather page refresh callback: runs inside LVGL lock (button click).
  * Just sets the refresh flag — the actual HTTPS fetch happens in data_task
  * on the next 1s tick, OUTSIDE the LVGL lock (TLS + JSON parse must not
@@ -274,6 +283,10 @@ static void boot_key_task(void *arg)
                         if (ui_get_current_page() == PAGE_DRAW) {
                             DrawUi_SaveAndExit();
                             DrawUi_RestoreIndevPeriod();
+                        } else if (ui_get_current_page() == PAGE_SNAKE) {
+                            /* 贪吃蛇页：BOOT 短按 = 停 timer + 退回 dashboard */
+                            SnakeUi_Exit();
+                            snake_back_cb();
                         } else {
                             ui_page_t cur = ui_get_current_page();
                             if (cur == PAGE_PET) {
@@ -484,10 +497,11 @@ static void data_task(void *arg)
         }
 
         /* Idle return to pet page: if user stays on a non-pet page for 60 s,
-         * auto-switch back to the pet (screen-saver behavior). */
+         * auto-switch back to the pet (screen-saver behavior).
+         * PAGE_SNAKE 例外——游戏中不让闲置逻辑把人踢回 pet 屏；退出靠 BOOT 短按。*/
         {
             ui_page_t cur = ui_get_current_page();
-            if (cur != PAGE_PET) {
+            if (cur != PAGE_PET && cur != PAGE_SNAKE) {
                 if (s_last_activity_tick == 0) s_last_activity_tick = tick;
                 if ((tick - s_last_activity_tick) >= 60) {
                     if (Lvgl_Lock(500)) {
@@ -762,6 +776,13 @@ extern "C" void app_main(void)
             Lvgl_Unlock();
         }
 
+        /* Snake UI (贪吃蛇，右下角长按入口) — 唤醒路径同样注册 */
+        if (Lvgl_Lock(-1)) {
+            SnakeUi_Init();
+            SnakeUi_SetBackCallback(snake_back_cb);
+            Lvgl_Unlock();
+        }
+
         /* WiFi AP + Web deferred — lazy-init on BOOT long-press */
 
         /* Start data task */
@@ -942,6 +963,14 @@ extern "C" void app_main(void)
         Lvgl_Unlock();
     }
     ESP_LOGI(TAG, "Draw UI init done");
+
+    /* 13d. Snake UI (贪吃蛇，右下角长按入口) */
+    if (Lvgl_Lock(-1)) {
+        SnakeUi_Init();
+        SnakeUi_SetBackCallback(snake_back_cb);
+        Lvgl_Unlock();
+    }
+    ESP_LOGI(TAG, "Snake UI init done");
 
     /* 14. WiFi AP + Web Server
      * STA WiFi is initialized inline above (step 7). The HTTP server now
