@@ -30,3 +30,12 @@ gpt-image-*
 progress_weather.md
 nvs_config.csv
 scripts/_conv_meta*.txt
+
+# Embedded upstream clones (have their own .git, must not be committed)
+ECC/
+
+# Local working worktrees / branches checked out for parallel work
+.worktrees/
+
+# PC LVGL sim harness (local dev tool, lives under a worktree)
+.claude/worktrees/
