@@ -10,8 +10,8 @@
 #include "pet_ui.h"
 #include "draw_ui.h"
 #include "snake_ui.h"
+#include "app_list_ui.h"
 #include "esp_heap_caps.h"
-#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -25,6 +25,7 @@ static lv_obj_t *s_wifi_screen = NULL;
 static lv_obj_t *s_pet_screen = NULL;
 static lv_obj_t *s_draw_screen = NULL;
 static lv_obj_t *s_snake_screen = NULL;
+static lv_obj_t *s_app_list_screen = NULL;
 
 /* ── Helper: clean container (no border, no scroll, transparent) ── */
 static lv_obj_t *create_quadrant(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
@@ -170,22 +171,18 @@ static void setup_bottom_left(lv_ui *ui)
 }
 
 /* ── Bottom-right: Image placeholder ───────────────── */
-/* 点击右下角 → 进入画板。widget 句柄仍叫 lbl_image_placeholder
- * （保留 ui 结构体字段名，避免改动外层），实际是文字占位；缩略图由独立的
- * img_draw_thumb canvas 承载。pomodoro 运行时二者都隐藏（见 ui_update_timer_mini）。*/
+/* 点击右下角 → 进入应用列表页（贪吃蛇/画板都从应用列表进）。
+ * widget 句柄仍叫 lbl_image_placeholder（保留 ui 结构体字段名，避免改动外层），
+ * 实际是文字占位；缩略图由独立的 img_draw_thumb canvas 承载。
+ * pomodoro 运行时二者都隐藏（见 ui_update_timer_mini）。*/
+/* 短按右下角 → 进入应用列表页（不再用长按区分贪吃蛇/画板——之前在 dashboard
+ * 右下角用 LVGL LONG_PRESSED + CLICKED 屏蔽标志区分短/长按失败 3 次，
+ * LVGL v9 长按时序+子对象冒泡导致标志对不上。改用应用列表页中转，
+ * 贪吃蛇/画板入口搬到应用列表的 2×2 网格里）。 */
 static void draw_entry_click_cb(lv_event_t *e)
 {
     (void)e;
-    ui_switch_page(PAGE_DRAW);
-}
-
-/* 长按右下角 → 进入贪吃蛇（短按仍画板，见 draw_entry_click_cb）。
- * LVGL LONG_PRESSED 默认在 >=400ms 触发——右下角是静态占位区无其它手势冲突，
- * 不会像画板那样与拖动画线打架，故可安全用长按。*/
-static void snake_entry_longpress_cb(lv_event_t *e)
-{
-    (void)e;
-    ui_switch_page(PAGE_SNAKE);
+    ui_switch_page(PAGE_APP_LIST);
 }
 
 /* 缩略图尺寸（与 draw_ui 的 THUMB_W/H 对应：右下角占位区 100×100）*/
@@ -214,10 +211,9 @@ static void setup_bottom_right(lv_ui *ui)
 {
     ui->cont_bottom_right = create_quadrant(ui->screen, 100, 100, 100, 100);
 
-    /* 整个右下角象限：短按 → 画板，长按 → 贪吃蛇 */
+    /* 整个右下角象限：短按 → 应用列表页 */
     lv_obj_add_flag(ui->cont_bottom_right, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(ui->cont_bottom_right, draw_entry_click_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(ui->cont_bottom_right, snake_entry_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
 
     /* 缩略图 canvas（100×100，铺满象限）。懒分配 PSRAM。
      * 无作品时 hidden，显示下方 'Image' 文字。*/
@@ -532,6 +528,14 @@ void ui_switch_page(ui_page_t page)
         if (s_snake_screen) {
             SnakeUi_Enter();   /* 重置新局 + 显示"点屏幕开始" */
             lv_screen_load(s_snake_screen);
+        }
+    } else if (page == PAGE_APP_LIST) {
+        if (!s_app_list_screen) {
+            s_app_list_screen = AppListUi_GetScreen();
+        }
+        if (s_app_list_screen) {
+            AppListUi_Enter();
+            lv_screen_load(s_app_list_screen);
         }
     }
 }

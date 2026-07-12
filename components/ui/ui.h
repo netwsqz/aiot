@@ -77,6 +77,7 @@ typedef enum {
     PAGE_PET,
     PAGE_DRAW,
     PAGE_SNAKE,
+    PAGE_APP_LIST,
 } ui_page_t;
 
 void ui_switch_page(ui_page_t page);

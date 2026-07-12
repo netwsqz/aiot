@@ -24,6 +24,7 @@
 #include "ui.h"
 #include "pet_ui.h"
 #include "snake_ui.h"
+#include "app_list_ui.h"
 
 /* mock 的可调接口（mocks.c） */
 extern void mock_rtc_set_hour(uint8_t h);
@@ -38,7 +39,7 @@ static bool s_pomo = false;
 static void dump_help(void)
 {
     printf("\n=== AIoT PC sim ===\n");
-    printf(" 1 dashboard  2 pet  3 todo  4 timer  5 weather  6 wifi  7 draw  8 snake\n");
+    printf(" 1 dashboard  2 pet  3 todo  4 timer  5 weather  6 wifi  7 draw  8 snake  9 app_list\n");
     printf(" b/-10%%  Shift+b/+10%%  h/hour+1  p/pomodoro toggle  ESC quit\n");
     printf("==================\n");
 }
@@ -72,6 +73,10 @@ int main(int argc, char *argv[])
     PetUi_SetBackCallback(NULL);
     SnakeUi_Init();
     SnakeUi_SetBackCallback(NULL);
+    AppListUi_Init();
+    AppListUi_SetBackCallback(NULL);          /* sim 里左滑不导航（NULL） */
+    AppListUi_SetEnterSnakeCallback(NULL);    /* sim 里格子点击用按键驱动 */
+    AppListUi_SetEnterDrawCallback(NULL);
     ui_switch_page(PAGE_PET);
 
     dump_help();
@@ -93,6 +98,7 @@ int main(int argc, char *argv[])
                     case SDLK_6: ui_switch_page(PAGE_WIFI_MGMT); break;
                     case SDLK_7: ui_switch_page(PAGE_DRAW); break;
                     case SDLK_8: ui_switch_page(PAGE_SNAKE); break;
+                    case SDLK_9: ui_switch_page(PAGE_APP_LIST); break;
                     case SDLK_b:
                         if (ev.key.keysym.mod & KMOD_SHIFT) { s_batt += 10; if (s_batt>100) s_batt=100; }
                         else { s_batt -= 10; if (s_batt<0) s_batt=0; }

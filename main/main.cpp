@@ -29,6 +29,7 @@
 #include "pet_ui.h"
 #include "draw_ui.h"
 #include "snake_ui.h"
+#include "app_list_ui.h"
 #include "esp_sleep.h"
 #include "driver/rtc_io.h"
 #include "nvs_flash.h"
@@ -172,6 +173,25 @@ static void draw_back_cb(void)
 static void snake_back_cb(void)
 {
     ui_switch_page(PAGE_DASHBOARD);
+}
+
+/* App list page back callback: 左滑手势退出 → dashboard。
+ * 运行在 LVGL 锁内（由 AppListUi 的 LV_EVENT_GESTURE 回调触发）。*/
+static void app_list_back_cb(void)
+{
+    ui_switch_page(PAGE_DASHBOARD);
+}
+
+/* App list 格子点击：进入贪吃蛇。运行在 LVGL 锁内。 */
+static void app_list_enter_snake_cb(void)
+{
+    ui_switch_page(PAGE_SNAKE);
+}
+
+/* App list 格子点击：进入画板。运行在 LVGL 锁内。 */
+static void app_list_enter_draw_cb(void)
+{
+    ui_switch_page(PAGE_DRAW);
 }
 
 /* Weather page refresh callback: runs inside LVGL lock (button click).
@@ -776,10 +796,20 @@ extern "C" void app_main(void)
             Lvgl_Unlock();
         }
 
-        /* Snake UI (贪吃蛇，右下角长按入口) — 唤醒路径同样注册 */
+        /* Snake UI (贪吃蛇，应用列表入口) — 唤醒路径同样注册 */
         if (Lvgl_Lock(-1)) {
             SnakeUi_Init();
             SnakeUi_SetBackCallback(snake_back_cb);
+            Lvgl_Unlock();
+        }
+
+        /* App list UI (应用列表，右下角短按入口) — 唤醒路径同样注册。
+         * 贪吃蛇/画板入口从此页中转，不再用 dashboard 右下角长按。 */
+        if (Lvgl_Lock(-1)) {
+            AppListUi_Init();
+            AppListUi_SetBackCallback(app_list_back_cb);
+            AppListUi_SetEnterSnakeCallback(app_list_enter_snake_cb);
+            AppListUi_SetEnterDrawCallback(app_list_enter_draw_cb);
             Lvgl_Unlock();
         }
 
@@ -964,13 +994,24 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "Draw UI init done");
 
-    /* 13d. Snake UI (贪吃蛇，右下角长按入口) */
+    /* 13d. Snake UI (贪吃蛇，应用列表入口) */
     if (Lvgl_Lock(-1)) {
         SnakeUi_Init();
         SnakeUi_SetBackCallback(snake_back_cb);
         Lvgl_Unlock();
     }
     ESP_LOGI(TAG, "Snake UI init done");
+
+    /* 13e. App list UI (应用列表，右下角短按入口)。
+     * 贪吃蛇/画板入口从此页中转，不再用 dashboard 右下角长按。 */
+    if (Lvgl_Lock(-1)) {
+        AppListUi_Init();
+        AppListUi_SetBackCallback(app_list_back_cb);
+        AppListUi_SetEnterSnakeCallback(app_list_enter_snake_cb);
+        AppListUi_SetEnterDrawCallback(app_list_enter_draw_cb);
+        Lvgl_Unlock();
+    }
+    ESP_LOGI(TAG, "App list UI init done");
 
     /* 14. WiFi AP + Web Server
      * STA WiFi is initialized inline above (step 7). The HTTP server now
