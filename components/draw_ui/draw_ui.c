@@ -1,4 +1,5 @@
 #include "draw_ui.h"
+#include "bmp1bpp.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -14,11 +15,8 @@ static const char *TAG = "draw_ui";
 #define DRAW_ROW_BYTES  ((DRAW_W + 7) / 8)   /* 25 字节/行 */
 #define DRAW_BUF_SIZE   (DRAW_W * DRAW_H / 8) /* 5000 字节 */
 
-/* BMP 1bpp：行 4 字节对齐 padding（25→28）*/
-#define BMP_HEADER_SIZE     54
-#define BMP_COLOR_TABLE     8
-#define BMP_ROW_PADDED      28
-#define BMP_FILE_SIZE       (BMP_HEADER_SIZE + BMP_COLOR_TABLE + BMP_ROW_PADDED * DRAW_H)
+/* BMP 1bpp 的行 4 字节对齐 padding（25→28），画缩略图时按源行步进用 */
+#define BMP_ROW_PADDED  BMP1BPP_ROW_PADDED
 
 #define DRAW_SPIFFS_PATH  "/spiffs/draw.bmp"
 
@@ -138,73 +136,32 @@ static void draw_released_cb(lv_event_t *e)
 }
 
 /* ──────────────────────────────────────────────────────────────
- * BMP 读写（1bpp，仿 standby_screen，独立路径 /spiffs/draw.bmp）
+ * BMP 读写（1bpp，200×200）—— 格式实现在 bmp1bpp.c，standby_screen 共用。
+ * 位约定转换在这里做一次：EPD 缓冲 1=白，BMP 1bpp 1=黑，故写出/读入各取反。
  * ────────────────────────────────────────────────────────────── */
 
-/* 校验 SPIFFS 里的 BMP 是否是合法 200×200 1bpp。*/
-static bool bmp_validate(FILE *f)
+void draw_ui_save_current(void)
 {
-    uint8_t hdr[BMP_HEADER_SIZE];
-    if (fread(hdr, 1, BMP_HEADER_SIZE, f) != BMP_HEADER_SIZE) return false;
-    if (hdr[0] != 'B' || hdr[1] != 'M') return false;
-    uint16_t bpp = (uint16_t)(hdr[28] | (hdr[29] << 8));
-    if (bpp != 1) return false;
-    int32_t w = hdr[18] | (hdr[19] << 8) | (hdr[20] << 16) | (hdr[21] << 24);
-    int32_t h = hdr[22] | (hdr[23] << 8) | (hdr[24] << 16) | (hdr[25] << 24);
-    if (w != DRAW_W || h != DRAW_H) return false;
-    uint32_t off = hdr[10] | (hdr[11] << 8) | (hdr[12] << 16) | (hdr[13] << 24);
-    if (off < BMP_HEADER_SIZE || off > BMP_HEADER_SIZE + 256) return false;
-    return true;
-}
-
-/* 把当前 1bpp 笔迹缓冲写为 /spiffs/draw.bmp。
- * EPD 格式(1=白) → BMP 1bpp(1=黑)：取反；BMP 行底向上：逆序写。*/
-void draw_ui_save_current(void){
     if (!s_draw_buf) return;
 
-    uint8_t hdr[BMP_HEADER_SIZE];
-    memset(hdr, 0, sizeof(hdr));
-    hdr[0] = 'B'; hdr[1] = 'M';
-    uint32_t fsize = BMP_FILE_SIZE;
-    hdr[2] = fsize & 0xFF; hdr[3] = (fsize >> 8) & 0xFF;
-    hdr[4] = (fsize >> 16) & 0xFF; hdr[5] = (fsize >> 24) & 0xFF;
-    uint32_t off = BMP_HEADER_SIZE + BMP_COLOR_TABLE;  /* 62 */
-    hdr[10] = off & 0xFF; hdr[11] = (off >> 8) & 0xFF;
-    hdr[12] = (off >> 16) & 0xFF; hdr[13] = (off >> 24) & 0xFF;
-    hdr[14] = 40;                          /* BITMAPINFOHEADER */
-    hdr[18] = DRAW_W & 0xFF; hdr[19] = (DRAW_W >> 8) & 0xFF;
-    hdr[22] = DRAW_H & 0xFF; hdr[23] = (DRAW_H >> 8) & 0xFF;
-    hdr[26] = 1; hdr[27] = 0;              /* planes */
-    hdr[28] = 1; hdr[29] = 0;              /* bpp */
-    hdr[46] = 2; hdr[47] = 0;              /* colors used */
-    /* 分辨率 2835 ppm */
-    hdr[38] = 0x13; hdr[39] = 0x0B; hdr[42] = 0x13; hdr[43] = 0x0B;
-
-    /* 调色板：index0=白 FF FF FF，index1=黑 00 00 00 */
-    uint8_t color_table[BMP_COLOR_TABLE] = {
-        0xFF, 0xFF, 0xFF, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-    };
+    uint8_t *bmp = heap_caps_malloc(BMP1BPP_BUF_SIZE, MALLOC_CAP_SPIRAM);
+    if (!bmp) {
+        ESP_LOGE(TAG, "save buf alloc failed");
+        return;
+    }
+    for (int i = 0; i < DRAW_BUF_SIZE; i++) bmp[i] = (uint8_t)~s_draw_buf[i];
 
     FILE *f = fopen(DRAW_SPIFFS_PATH, "wb");
     if (!f) {
         ESP_LOGE(TAG, "open %s for write failed", DRAW_SPIFFS_PATH);
+        free(bmp);
         return;
     }
-    fwrite(hdr, 1, BMP_HEADER_SIZE, f);
-    fwrite(color_table, 1, BMP_COLOR_TABLE, f);
-
-    uint8_t pad[3] = {0};
-    /* 行底向上：从 y=199(图像底=屏幕底) 写到 y=0 */
-    for (int y = DRAW_H - 1; y >= 0; y--) {
-        uint8_t inv[DRAW_ROW_BYTES];
-        for (int b = 0; b < DRAW_ROW_BYTES; b++)
-            inv[b] = (uint8_t)~s_draw_buf[y * DRAW_ROW_BYTES + b];
-        fwrite(inv, 1, DRAW_ROW_BYTES, f);
-        fwrite(pad, 1, BMP_ROW_PADDED - DRAW_ROW_BYTES, f);
-    }
+    bool ok = Bmp1Bpp_Write(f, bmp);
     fclose(f);
-    ESP_LOGI(TAG, "draw image saved");
+    free(bmp);
+    if (ok) ESP_LOGI(TAG, "draw image saved");
+    else    ESP_LOGE(TAG, "draw image save failed");
 }
 
 /* 保存当前笔迹并退出回 dashboard。由 BOOT 键单击路径调用（替代长按退出）。
@@ -219,7 +176,7 @@ bool DrawUi_HasSavedImage(void)
 {
     FILE *f = fopen(DRAW_SPIFFS_PATH, "rb");
     if (!f) return false;
-    bool ok = bmp_validate(f);
+    bool ok = Bmp1Bpp_Validate(f);
     fclose(f);
     return ok;
 }
@@ -231,7 +188,7 @@ bool DrawUi_HasSavedImage(void)
 
 /* 把 SPIFFS 里保存的作品降采样渲染到 dst canvas（须为 THUMB_W×THUMB_H ARGB8888）。
  * 无文件或校验失败返回 false。dst_buf 须至少 THUMB_W*THUMB_H*4 字节。
- * 黑(EPD bit=0) → 0xFF000000，白 → 0xFFFFFFFF。
+ * 黑(BMP bit=1) → 0xFF000000，白 → 0xFFFFFFFF。
  * 在 LVGL 锁内调用（写 canvas buffer + invalidate）。*/
 bool DrawUi_RenderThumbnail(uint8_t *dst_buf, int len)
 {
@@ -240,47 +197,40 @@ bool DrawUi_RenderThumbnail(uint8_t *dst_buf, int len)
     FILE *f = fopen(DRAW_SPIFFS_PATH, "rb");
     if (!f) return false;
 
-    uint8_t hdr[BMP_HEADER_SIZE];
-    if (fread(hdr, 1, BMP_HEADER_SIZE, f) != BMP_HEADER_SIZE) { fclose(f); return false; }
-    /* 复用 bmp_validate 的校验逻辑（不抽出来，避免多一个出参）*/
-    if (hdr[0] != 'B' || hdr[1] != 'M') { fclose(f); return false; }
-    uint16_t bpp = (uint16_t)(hdr[28] | (hdr[29] << 8));
-    if (bpp != 1) { fclose(f); return false; }
-    int32_t w = hdr[18] | (hdr[19] << 8) | (hdr[20] << 16) | (hdr[21] << 24);
-    int32_t h = hdr[22] | (hdr[23] << 8) | (hdr[24] << 16) | (hdr[25] << 24);
-    if (w != DRAW_W || h != DRAW_H) { fclose(f); return false; }
-    uint32_t off = hdr[10] | (hdr[11] << 8) | (hdr[12] << 16) | (hdr[13] << 24);
-    if (off < BMP_HEADER_SIZE || off > BMP_HEADER_SIZE + 256) { fclose(f); return false; }
+    /* 借 Bmp1Bpp_Read 做校验 + 取像素，顺带把位约定翻过来：
+     * BMP 1=黑 → 我们缓冲 1=白，和 s_draw_buf 一致。 */
+    uint8_t *src = heap_caps_malloc(BMP1BPP_BUF_SIZE, MALLOC_CAP_SPIRAM);
+    if (!src || !Bmp1Bpp_Read(f, src)) {
+        fclose(f);
+        free(src);
+        return false;
+    }
+    fclose(f);
+    for (int i = 0; i < BMP1BPP_BUF_SIZE; i++) src[i] = (uint8_t)~src[i];
 
-    /* 读两行源数据交替使用（BMP 底向上：文件里第 0 行 = 图像底）。
-     * BMP 1bpp: 1=黑 0=白。源行 y_src(图像坐标) 对应文件行 (DRAW_H-1-y_src)。*/
-    uint8_t row0[DRAW_ROW_BYTES], row1[DRAW_ROW_BYTES];
     lv_color32_t *px = (lv_color32_t *)dst_buf;
 
     for (int ty = 0; ty < THUMB_H; ty++) {
         int sy0 = ty * 2;
         int sy1 = ty * 2 + 1;
-        fseek(f, (long)(off + (uint32_t)(DRAW_H - 1 - sy0) * BMP_ROW_PADDED), SEEK_SET);
-        if (fread(row0, 1, DRAW_ROW_BYTES, f) != DRAW_ROW_BYTES) { fclose(f); return false; }
-        fseek(f, (long)(off + (uint32_t)(DRAW_H - 1 - sy1) * BMP_ROW_PADDED), SEEK_SET);
-        if (fread(row1, 1, DRAW_ROW_BYTES, f) != DRAW_ROW_BYTES) { fclose(f); return false; }
 
         for (int tx = 0; tx < THUMB_W; tx++) {
             int sx0 = tx * 2, sx1 = tx * 2 + 1;
-            /* 数 4 个源像素里黑的个数。BMP 1=黑。*/
+            /* 数 4 个源像素里黑的个数（缓冲里 1=白，故取反后 1=黑）。*/
             int black = 0;
             uint8_t b;
-            b = row0[sx0 >> 3]; if (b & (0x80 >> (sx0 & 7))) black++;
-            b = row0[sx1 >> 3]; if (b & (0x80 >> (sx1 & 7))) black++;
-            b = row1[sx0 >> 3]; if (b & (0x80 >> (sx0 & 7))) black++;
-            b = row1[sx1 >> 3]; if (b & (0x80 >> (sx1 & 7))) black++;
+            b = src[sy0 * BMP1BPP_ROW_BYTES + (sx0 >> 3)]; if (b & (0x80 >> (sx0 & 7))) black++;
+            b = src[sy0 * BMP1BPP_ROW_BYTES + (sx1 >> 3)]; if (b & (0x80 >> (sx1 & 7))) black++;
+            b = src[sy1 * BMP1BPP_ROW_BYTES + (sx0 >> 3)]; if (b & (0x80 >> (sx0 & 7))) black++;
+            b = src[sy1 * BMP1BPP_ROW_BYTES + (sx1 >> 3)]; if (b & (0x80 >> (sx1 & 7))) black++;
             /* >=2 黑 → 黑（多数投票，保留笔迹主体）*/
             px[ty * THUMB_W + tx] = (black >= 2)
                 ? lv_color32_make(0, 0, 0, 255)
                 : lv_color32_make(255, 255, 255, 255);
         }
     }
-    fclose(f);
+
+    free(src);
     return true;
 }
 

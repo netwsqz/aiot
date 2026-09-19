@@ -14,6 +14,7 @@
 #include "esp_random.h"
 
 #include "lvgl.h"
+#include "lvgl_port.h"   /* Lvgl_Lock/Lvgl_Unlock —— 见文件末尾的单线程等价物 */
 #include "todo_manager.h"
 #include "todo_ui.h"
 #include "timer_engine.h"
@@ -170,6 +171,7 @@ void TodoUi_SetBackCallback(void (*cb)(void)){(void)cb;}
 esp_err_t TimerUi_Init(void){return ESP_OK;}
 lv_obj_t *TimerUi_GetScreen(void){return NULL;}
 void TimerUi_ShowPage(timer_page_t p){(void)p;}
+timer_page_t TimerUi_GetCurrentPage(void){return TIMER_PAGE_TOOLS;}
 void TimerUi_SetBackCallback(void (*cb)(void)){(void)cb;}
 void TimerUi_PushFiredEvent(uint8_t id, timer_kind_t k, uint32_t t){(void)id;(void)k;(void)t;}
 void TimerUi_TickUpdate(void){}
@@ -193,3 +195,11 @@ void WifiUi_SetRefreshWeatherCallback(void (*cb)(void)){(void)cb;}
 /* DrawUi_* 现在编译进真 draw_ui.c（见 CMakeLists target_sources）。
  * draw_ui.c 用 fopen("/spiffs/draw.bmp")：PC 无 SPIFFS，fopen 失败时
  * HasSavedImage/RenderThumbnail 安全返回 false，sim 降级不崩。*/
+
+
+/* ─────────── LVGL 锁 ───────────
+ * 实机上是 FreeRTOS 递归互斥量（lvgl_port.cpp）。sim 是单线程 —— LVGL 只在
+ * 主循环里跑，没有 data_task 并发 —— 所以"拿锁"就是恒成功、什么也不做。
+ * 真 lvgl_port.cpp 未编进 PC 工程，故此处的定义填它的位置。*/
+bool Lvgl_Lock(int timeout_ms) { (void)timeout_ms; return true; }
+void Lvgl_Unlock(void) {}

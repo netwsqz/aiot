@@ -1,4 +1,5 @@
 #include "timer_engine.h"
+#include "timer_pure.h"
 #include <string.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
@@ -28,7 +29,6 @@ static timer_instance_t s_fired_buf[TIMER_MAX_SLOTS];
 static void tick_cb(TimerHandle_t tmr)
 {
     (void)tmr;
-    int fired_count = 0;
 
     /* This callback runs in the FreeRTOS timer service task. Use a
      * non-blocking take: if a higher-priority app task (e.g. data_task)
@@ -36,14 +36,7 @@ static void tick_cb(TimerHandle_t tmr)
      * timer daemon and freeze ALL software timers. Skipping a tick costs
      * at most 1s of countdown drift, which is harmless. */
     if (xSemaphoreTake(s_mutex, 0) != pdTRUE) return;
-    for (int i = 0; i < TIMER_MAX_SLOTS; i++) {
-        if (!s_slots[i].active) continue;
-        if (s_slots[i].remaining_sec > 0) s_slots[i].remaining_sec--;
-        if (s_slots[i].remaining_sec == 0) {
-            s_slots[i].active = false;
-            s_fired_buf[fired_count++] = s_slots[i];
-        }
-    }
+    int fired_count = TimerPure_Tick(s_slots, TIMER_MAX_SLOTS, s_fired_buf);
     xSemaphoreGive(s_mutex);
 
     for (int i = 0; i < fired_count; i++) {
@@ -79,18 +72,23 @@ esp_err_t TimerEngine_Init(void)
 
 static void fill_slot(int slot, timer_kind_t kind, uint32_t minutes, uint8_t *out_id)
 {
-    s_slots[slot].id            = s_next_id++;
+    /* id 用单调递增计数器，不用「活跃槽位最大值+1」——后者在取消掉高 id
+     * 计时器后会把同一个 id 发第二次。TimerPure_RecoverNextId 只在 Restore
+     * 时用（那个场景下计数器本身也要从槽位恢复）。 */
+    uint8_t id = s_next_id++;
     if (s_next_id == 0) s_next_id = 1;
+
+    s_slots[slot].id            = id;
     s_slots[slot].kind          = kind;
-    s_slots[slot].total_seconds = minutes * 60;
-    s_slots[slot].remaining_sec = minutes * 60;
+    s_slots[slot].total_seconds = TimerPure_TotalSeconds(minutes);
+    s_slots[slot].remaining_sec = s_slots[slot].total_seconds;
     s_slots[slot].active        = true;
-    if (out_id) *out_id = s_slots[slot].id;
+    if (out_id) *out_id = id;
 }
 
 esp_err_t TimerEngine_StartPomodoro(uint32_t minutes, uint8_t *out_id)
 {
-    if (minutes == 0 || minutes > 180) return ESP_ERR_INVALID_ARG;
+    if (!TimerPure_ValidMinutes(minutes)) return ESP_ERR_INVALID_ARG;
     if (!s_mutex) return ESP_ERR_INVALID_STATE;  /* Init not called / failed */
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -108,7 +106,7 @@ esp_err_t TimerEngine_StartPomodoro(uint32_t minutes, uint8_t *out_id)
 
 esp_err_t TimerEngine_StartReminder(uint32_t minutes, uint8_t *out_id)
 {
-    if (minutes == 0 || minutes > 180) return ESP_ERR_INVALID_ARG;
+    if (!TimerPure_ValidMinutes(minutes)) return ESP_ERR_INVALID_ARG;
     if (!s_mutex) return ESP_ERR_INVALID_STATE;  /* Init not called / failed */
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -268,21 +266,17 @@ esp_err_t TimerEngine_Restore(void)
     nvs_close(nvs);
 
     /* Compute elapsed time */
-    int64_t now_sec  = rtc_now_unix();
-    int64_t elapsed  = now_sec - data.rtc_timestamp;
-    if (elapsed < 0) elapsed = 0;
+    int64_t elapsed = TimerPure_ElapsedSec(rtc_now_unix(), data.rtc_timestamp);
 
     int restored = 0;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     for (int i = 0; i < TIMER_MAX_SLOTS; i++) {
         if (!data.slots[i].active) continue;
 
-        uint32_t remaining = data.slots[i].remaining_sec;
-        if ((int64_t)remaining <= elapsed) {
-            /* Expired during sleep — silently drop */
-            continue;
+        uint32_t remaining;
+        if (!TimerPure_RemainingAfter(data.slots[i].remaining_sec, elapsed, &remaining)) {
+            continue;   /* 睡眠期间已到期 —— 静默丢弃 */
         }
-        remaining -= (uint32_t)elapsed;
 
         s_slots[i].id            = data.slots[i].id;
         s_slots[i].kind          = (timer_kind_t)data.slots[i].kind;
@@ -292,17 +286,9 @@ esp_err_t TimerEngine_Restore(void)
         restored++;
     }
 
-    /* Recover next_id as max(id) + 1. s_next_id is uint8_t so it wraps at
-     * 255→0; clamp to 1 to avoid handing out id 0 (TimerEngine_Cancel
-     * treats 0 as INVALID_ARG). A wraparound collision with a still-active
-     * restored id is possible in pathological cases but requires 255 ids
-     * across one sleep cycle, which is unrealistic for this 4-slot engine. */
-    uint8_t max_id = 0;
-    for (int i = 0; i < TIMER_MAX_SLOTS; i++) {
-        if (s_slots[i].active && s_slots[i].id > max_id) max_id = s_slots[i].id;
-    }
-    s_next_id = (uint8_t)(max_id + 1);
-    if (s_next_id == 0) s_next_id = 1;
+    /* Recover next_id as max(id) + 1 (see TimerPure_RecoverNextId for why the
+     * normal start path must NOT use this). */
+    s_next_id = TimerPure_RecoverNextId(s_slots, TIMER_MAX_SLOTS);
 
     xSemaphoreGive(s_mutex);
 

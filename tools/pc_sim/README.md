@@ -89,3 +89,34 @@ sim 覆盖不到的真机行为（必须 `idf.py flash` 实测）：
 - SPIFFS `/spiffs/draw.bmp` 真实读写 + 2×2 多数票降采样缩略图
 - indev 8ms 提速（`DrawUi_SetIndevFast`）对触摸曲线的实际影响
 - 深睡眠唤醒后 `app_main` 重跑路径
+
+## 主机自检：`bmp1bpp_selftest.c`
+
+sim 跑不到 SPIFFS，所以 `bmp1bpp.c`（standby 图和画板共用的 1bpp BMP 读写）
+单独有个纯主机往返检查，不依赖 SDL/LVGL/ESP-IDF：
+
+```bash
+gcc -I tools/pc_sim/include -I components/draw_ui \
+    components/draw_ui/bmp1bpp.c tools/pc_sim/bmp1bpp_selftest.c -o bmpcheck.exe
+./bmpcheck.exe
+```
+
+验证：写出的 BMP 能被自己读回、像素零差异、文件大小 5662、头字段（bpp/宽高/数据偏移）
+符合 1bpp 200×200 约定。改 `bmp1bpp.c` 的位序或行序后必跑。
+
+## 主机自检：`timer_pure_selftest.c`
+
+`timer_engine` 里改动最频繁、出过最多 bug 的三段算术（倒计时归零、睡眠后 elapsed
+折算、id 回绕）已抽成 `components/timer_engine/timer_pure.c` —— 无锁、无 NVS、
+不碰 FreeRTOS，所以能脱离硬件跑：
+
+```bash
+gcc -I tools/pc_sim/include -I components/timer_engine \
+    components/timer_engine/timer_pure.c tools/pc_sim/timer_pure_selftest.c \
+    -o timercheck.exe
+./timercheck.exe
+```
+
+覆盖：递减与归零顺序、`fired[]` 快照的 active 必须为 false（回调依赖）、
+死槽不重复触发、`remaining==0` 不回绕、RTC 调回时 elapsed 钳 0、
+睡眠正好到期（`<=` 是刻意的）、id 回绕钳 1。改 `timer_pure.c` 后必跑。
