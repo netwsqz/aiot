@@ -144,7 +144,7 @@ LVGL event `user_data` must point to memory that outlives the function call. Sta
 - Design specs: `docs/ecc/specs/` · Implementation plans: `docs/ecc/plans/` and `.claude/plans/`
 - Web UI (standalone dev): `web_dev/index.html`
 - Roadmap / known gaps: `docs/NEXT-STEPS-2026-07.md`
-- Project rules (ESP-IDF specialization of common/cpp standards): `.claude/rules/ecc/`
+- Project rules (ESP-IDF 特化条款): `.claude/rules/esp-idf.md`
 
 ## Agent skills
 

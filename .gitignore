@@ -32,7 +32,8 @@ nvs_config.csv
 scripts/_conv_meta*.txt
 
 # Embedded upstream clones (have their own .git, must not be committed)
-ECC/
+# Leading slash is required — bare "ECC/" also matches docs/ecc/ and .claude/rules/ecc/
+/ECC/
 
 # Local working worktrees / branches checked out for parallel work
 .worktrees/
