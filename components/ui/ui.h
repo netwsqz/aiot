@@ -76,6 +76,8 @@ typedef enum {
     PAGE_WIFI_MGMT,
     PAGE_PET,
     PAGE_DRAW,
+    PAGE_SNAKE,
+    PAGE_APP_LIST,
 } ui_page_t;
 
 /* Create every sub-page (each init under the LVGL lock) and wire their back

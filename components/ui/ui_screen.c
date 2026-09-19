@@ -9,8 +9,9 @@
 #include "wifi_ui.h"
 #include "pet_ui.h"
 #include "draw_ui.h"
+#include "snake_ui.h"
+#include "app_list_ui.h"
 #include "esp_heap_caps.h"
-#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -23,6 +24,8 @@ static lv_obj_t *s_weather_screen = NULL;
 static lv_obj_t *s_wifi_screen = NULL;
 static lv_obj_t *s_pet_screen = NULL;
 static lv_obj_t *s_draw_screen = NULL;
+static lv_obj_t *s_snake_screen = NULL;
+static lv_obj_t *s_app_list_screen = NULL;
 
 /* ── Helper: clean container (no border, no scroll, transparent) ── */
 static lv_obj_t *create_quadrant(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
@@ -167,15 +170,18 @@ static void setup_bottom_left(lv_ui *ui)
     }
 }
 
-/* ── Bottom-right: 画板入口 ───────────────────────── */
-/* 点击右下角 → 进入画板。widget 句柄仍叫 lbl_image_placeholder
- * （保留 ui 结构体字段名，避免改动外层），实际是简洁的中文「画」入口提示；
- * 缩略图由独立的 img_draw_thumb canvas 承载。pomodoro 运行时二者都隐藏
- * （见 ui_update_timer_mini）。画板为次要功能，入口做弱化处理。*/
+/* ── Bottom-right: 应用列表入口 ───────────────────── */
+/* 点击右下角 → 进入应用列表页（贪吃蛇/画板都从应用列表进）。
+ * widget 句柄仍叫 lbl_image_placeholder（保留 ui 结构体字段名，避免改动外层），
+ * 实际是文字占位；缩略图由独立的 img_draw_thumb canvas 承载。
+ * pomodoro 运行时二者都隐藏（见 ui_update_timer_mini）。*/
+/* 不再用长按区分贪吃蛇/画板——之前在 dashboard 右下角用 LVGL LONG_PRESSED +
+ * CLICKED 屏蔽标志区分短/长按失败 3 次，LVGL v9 长按时序 + 子对象冒泡导致标志
+ * 对不上。改用应用列表页中转，两个入口搬到列表页的 2×2 网格里。*/
 static void draw_entry_click_cb(lv_event_t *e)
 {
     (void)e;
-    ui_switch_page(PAGE_DRAW);
+    ui_switch_page(PAGE_APP_LIST);
 }
 
 /* 缩略图尺寸（与 draw_ui 的 THUMB_W/H 对应：右下角占位区 100×100）*/
@@ -204,7 +210,7 @@ static void setup_bottom_right(lv_ui *ui)
 {
     ui->cont_bottom_right = create_quadrant(ui->screen, 100, 100, 100, 100);
 
-    /* 整个右下角象限可点击 → 画板 */
+    /* 整个右下角象限：短按 → 应用列表页 */
     lv_obj_add_flag(ui->cont_bottom_right, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(ui->cont_bottom_right, draw_entry_click_cb, LV_EVENT_CLICKED, NULL);
 
@@ -462,6 +468,18 @@ void ui_back_to_dashboard(void)
     ui_switch_page(PAGE_DASHBOARD);
 }
 
+/* App list 2×2 网格的两个入口。不是 back 回调，塞不进下面的注册表，
+ * 在 ui_init_all 里单独注入（同样让 main.cpp 不沾 UI 胶水）。 */
+static void app_list_enter_snake_cb(void)
+{
+    ui_switch_page(PAGE_SNAKE);
+}
+
+static void app_list_enter_draw_cb(void)
+{
+    ui_switch_page(PAGE_DRAW);
+}
+
 void ui_init_all(void)
 {
     /* One row per sub-page that owns a screen. Adding a page = adding a row.
@@ -482,12 +500,21 @@ void ui_init_all(void)
         { (void (*)(void))TodoUi_Init,  TodoUi_SetBackCallback },
         { (void (*)(void))PetUi_Init,   PetUi_SetBackCallback },
         { (void (*)(void))DrawUi_Init,  DrawUi_SetBackCallback },
+        { (void (*)(void))SnakeUi_Init, SnakeUi_SetBackCallback },
+        { (void (*)(void))AppListUi_Init, AppListUi_SetBackCallback },
     };
 
     for (size_t i = 0; i < sizeof reg / sizeof reg[0]; i++) {
         if (!Lvgl_Lock(-1)) continue;   /* ponytail: skip rather than race; -1 never fails today */
         reg[i].init();
         reg[i].set_back(ui_back_to_dashboard);
+        Lvgl_Unlock();
+    }
+
+    /* 应用列表的两个格子入口：不在 back 回调这个维度上，单独注入。 */
+    if (Lvgl_Lock(-1)) {
+        AppListUi_SetEnterSnakeCallback(app_list_enter_snake_cb);
+        AppListUi_SetEnterDrawCallback(app_list_enter_draw_cb);
         Lvgl_Unlock();
     }
 }
@@ -572,6 +599,24 @@ void ui_switch_page(ui_page_t page)
             DrawUi_Enter();   /* 每次进入即清空为空白 */
             DrawUi_SetIndevFast(lv_indev_get_next(NULL));  /* 8ms 采样，避免曲线变折线 */
             lv_screen_load(s_draw_screen);
+        }
+        break;
+    case PAGE_SNAKE:
+        if (!s_snake_screen) {
+            s_snake_screen = SnakeUi_GetScreen();
+        }
+        if (s_snake_screen) {
+            SnakeUi_Enter();   /* 重置新局 + 显示"点屏幕开始" */
+            lv_screen_load(s_snake_screen);
+        }
+        break;
+    case PAGE_APP_LIST:
+        if (!s_app_list_screen) {
+            s_app_list_screen = AppListUi_GetScreen();
+        }
+        if (s_app_list_screen) {
+            AppListUi_Enter();
+            lv_screen_load(s_app_list_screen);
         }
         break;
     }

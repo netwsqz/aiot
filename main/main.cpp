@@ -28,6 +28,8 @@
 #include "wifi_ui.h"
 #include "pet_ui.h"
 #include "draw_ui.h"
+#include "snake_ui.h"
+#include "app_list_ui.h"
 #include "esp_sleep.h"
 #include "driver/rtc_io.h"
 #include "nvs_flash.h"
@@ -239,6 +241,10 @@ static void boot_key_task(void *arg)
                         if (ui_get_current_page() == PAGE_DRAW) {
                             DrawUi_SaveAndExit();
                             DrawUi_RestoreIndevPeriod();
+                        } else if (ui_get_current_page() == PAGE_SNAKE) {
+                            /* 贪吃蛇页：BOOT 短按 = 停 timer + 退回 dashboard */
+                            SnakeUi_Exit();
+                            ui_back_to_dashboard();
                         } else {
                             ui_page_t cur = ui_get_current_page();
                             if (cur == PAGE_PET) {
@@ -454,10 +460,11 @@ static void data_task(void *arg)
          * tool page for 60 s, auto-switch back to the pet (screen-saver
          * behavior). Dashboard is the user's mixed companion summary — it is
          * NOT auto-left, so they can read todo/pomodoro/sensors at leisure.
-         * Todo/timer/weather/wifi/draw tool pages still time out. */
+         * Todo/timer/weather/wifi/draw tool pages still time out.
+         * PAGE_SNAKE 例外——游戏中不让闲置逻辑把人踢回 pet 屏；退出靠 BOOT 短按。*/
         {
             ui_page_t cur = ui_get_current_page();
-            if (cur != PAGE_PET && cur != PAGE_DASHBOARD) {
+            if (cur != PAGE_PET && cur != PAGE_DASHBOARD && cur != PAGE_SNAKE) {
                 if (s_last_activity_tick == 0) s_last_activity_tick = tick;
                 if ((tick - s_last_activity_tick) >= 60) {
                     if (Lvgl_Lock(500)) {
@@ -855,6 +862,9 @@ extern "C" void app_main(void)
         }
         Lvgl_Unlock();
     }
+
+    /* 13d/13e. Snake UI + App list UI —— 已并入 ui_init_all() 的页面注册表
+     * （见 ui_screen.c），此处不再重复 init。 */
 
     /* 14. WiFi AP + Web Server
      * STA WiFi is initialized inline above (step 7). The HTTP server now
