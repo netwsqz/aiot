@@ -45,6 +45,7 @@ static lv_obj_t     *s_screen_before_alert = NULL;
 static bool          s_alert_showing      = false;
 static bool          s_alert_chain_active = false;
 static timer_kind_t  s_last_fired_kind    = TIMER_KIND_POMODORO;
+static lv_timer_t   *s_alert_auto_timer   = NULL;  /* 30s 自动消失一次性定时器 */
 
 static const uint32_t POMO_PRESETS[3] = {15, 25, 50};
 static const uint32_t REM_PRESETS[6]   = {5, 10, 15, 30, 45, 60};
@@ -52,6 +53,7 @@ static const uint32_t REM_PRESETS[6]   = {5, 10, 15, 30, 45, 60};
 /* forward decl: refresh_pomodoro_page is defined later but called from pomo_start/cancel_cb */
 static void refresh_pomodoro_page(void);
 static void refresh_reminder_page(void);
+static void dismiss_alert(void);  /* 通用：点击/超时共用关闭流程 */
 
 /* ============ 通用：手势返回（无返回按钮，仿 todo_ui 新版） ============ */
 static void swipe_cb(lv_event_t *e)
@@ -433,9 +435,24 @@ static void refresh_reminder_page(void)
 }
 
 /* ============ 满屏到点提醒 ============ */
-static void alert_click_cb(lv_event_t *e)
+/* 30s 自动消失回调（LVGL 定时器上下文，无需再加锁）。
+ * 删除自身、复用 dismiss_alert() 完成与点击相同的切换。 */
+static void alert_auto_timer_cb(lv_timer_t *t)
 {
-    (void)e;
+    (void)t;
+    s_alert_auto_timer = NULL;  /* LVGL 已在回调后删除定时器，置空避免悬垂指针 */
+    dismiss_alert();
+}
+
+/* 通用关闭流程：点击和超时共用，避免重复切换代码。 */
+static void dismiss_alert(void)
+{
+    /* 删除自动消失定时器（超时回调里它已被 LVGL 删除，此处安全） */
+    if (s_alert_auto_timer) {
+        lv_timer_delete(s_alert_auto_timer);
+        s_alert_auto_timer = NULL;
+    }
+
     s_alert_showing = false;
     bool more_pending = s_fired_queue && (uxQueueMessagesWaiting(s_fired_queue) > 0);
     if (s_last_fired_kind == TIMER_KIND_POMODORO) {
@@ -450,6 +467,12 @@ static void alert_click_cb(lv_event_t *e)
         s_alert_chain_active = false;
     }
     /* 下一秒 TickUpdate 会自动弹队列里下一个 */
+}
+
+static void alert_click_cb(lv_event_t *e)
+{
+    (void)e;
+    dismiss_alert();
 }
 
 static void build_alert_screen(void)
@@ -535,6 +558,17 @@ static void show_alert(const fired_item_t *item)
     if (!s_alert_screen) build_alert_screen();
     fill_alert_content(item);
     lv_screen_load(s_alert_screen);
+
+    /* 启动 30s 自动消失一次性定时器（替换旧定时器，防止上一个队列项的定时器仍挂着） */
+    if (s_alert_auto_timer) {
+        lv_timer_delete(s_alert_auto_timer);
+        s_alert_auto_timer = NULL;
+    }
+    s_alert_auto_timer = lv_timer_create(alert_auto_timer_cb, 30000, NULL);
+    if (s_alert_auto_timer) {
+        lv_timer_set_repeat_count(s_alert_auto_timer, 1);  /* one-shot */
+    }
+
     ESP_LOGI(TAG, "Alert shown: kind=%d", item->kind);
 }
 
@@ -591,6 +625,8 @@ void TimerUi_ShowPage(timer_page_t page)
 }
 
 void TimerUi_SetBackCallback(void (*cb)(void)) { s_back_cb = cb; }
+
+timer_page_t TimerUi_GetCurrentPage(void) { return s_current_page; }
 
 void TimerUi_PushFiredEvent(uint8_t id, timer_kind_t kind, uint32_t total_seconds)
 {
