@@ -146,6 +146,20 @@ LVGL event `user_data` must point to memory that outlives the function call. Sta
 - Roadmap / known gaps: `docs/NEXT-STEPS-2026-07.md`
 - Project rules (ESP-IDF specialization of common/cpp standards): `.claude/rules/ecc/`
 
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues on `netwsqz/aiot` (via the `gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles map to the default label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` at the repo root plus `docs/adr/` for decisions. See `docs/agents/domain.md`.
+
 ---
 
 ## GPIO Full Table
