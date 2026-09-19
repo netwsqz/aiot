@@ -1208,8 +1208,8 @@ static lv_color32_t *s_canvas_buf = NULL;
 static pet_state_t s_cur_state = PET_STATE_HAPPY;
 static void (*s_back_cb)(void) = NULL;
 
-/* v1 新增状态（GREETING/CELEBRATE/REST/POKE）暂无独立位图，复用已有 6 态之一。
- * 用户补 PNG 后改这张表即可指向 PET_BMP_COUNT 之外的新位图。*/
+/* v1 新增的 GREETING/CELEBRATE/REST/POKE 为逻辑状态：复用已有 6 态位图，
+ * 通过持久状态标签（左上角 2 字）与气泡文案区分，不依赖独立位图。*/
 static const uint8_t s_bitmap_for[PET_STATE_COUNT] = {
     [PET_STATE_HAPPY]    = 0,  /* HAPPY */
     [PET_STATE_BUSY]     = 1,  /* BUSY */
@@ -1221,6 +1221,22 @@ static const uint8_t s_bitmap_for[PET_STATE_COUNT] = {
     [PET_STATE_CELEBRATE]= 0,  /* 复用 HAPPY */
     [PET_STATE_REST]     = 5,  /* 复用 SLEEP（犯困）*/
     [PET_STATE_POKE]     = 0,  /* 复用 HAPPY */
+};
+
+/* ── 持久状态标签：左上角 2 字中文，始终可见 ──
+ * 复用同一张位图的状态（如 GREETING/CELEBRATE/POKE 都用 HAPPY）靠这个标签
+ * 一眼分辨。空串表示该状态不显示标签（HAPPY 默认安静）。*/
+static const char *const s_state_label[PET_STATE_COUNT] = {
+    [PET_STATE_HAPPY]    = "",
+    [PET_STATE_BUSY]     = "忙",
+    [PET_STATE_ANXIOUS]  = "急",
+    [PET_STATE_FOCUS]    = "专注",
+    [PET_STATE_LOW_BATT] = "低电",
+    [PET_STATE_SLEEP]    = "睡眠",
+    [PET_STATE_GREETING] = "问候",
+    [PET_STATE_CELEBRATE]= "完成",
+    [PET_STATE_REST]     = "休息",
+    [PET_STATE_POKE]     = "撸",
 };
 
 /* ── 对白表：每状态 4 句，≤14 字（200px/14px）。NULL 表示该状态不显示气泡。── */
@@ -1239,6 +1255,7 @@ static const char *const s_lines[PET_STATE_COUNT][4] = {
 
 /* ── 气泡 UI：8s 自动隐藏 ── */
 static lv_obj_t *s_bubble = NULL;
+static lv_obj_t *s_state_label_lbl = NULL;   /* 左上角持久状态标签 */
 static lv_timer_t *s_bubble_timer = NULL;     /* 8s one-shot 隐藏 */
 static lv_timer_t *s_sleep_zzz_timer = NULL;  /* SLEEP 90s 周期 Zzz */
 
@@ -1347,10 +1364,25 @@ static void update_sleep_timer(pet_state_t s)
     }
 }
 
-/* 对外/对内统一的状态应用入口：画位图 + 气泡 + Zzz timer。*/
+/* 更新左上角持久状态标签：HAPPY 隐藏，其余状态显示对应中文。*/
+static void state_label_update(pet_state_t s)
+{
+    if (!s_state_label_lbl) return;
+    if (s >= PET_STATE_COUNT) s = PET_STATE_HAPPY;
+    const char *txt = s_state_label[s];
+    if (txt == NULL || txt[0] == '\0') {
+        lv_obj_add_flag(s_state_label_lbl, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_label_set_text(s_state_label_lbl, txt);
+    lv_obj_clear_flag(s_state_label_lbl, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* 对外/对内统一的状态应用入口：画位图 + 气泡 + Zzz timer + 状态标签。*/
 static void enter_state(pet_state_t s, bool show_bubble)
 {
     apply_state(s);
+    state_label_update(s);
     update_sleep_timer(s);
     if (show_bubble) {
         bubble_show(pick_line(s));
@@ -1507,6 +1539,20 @@ esp_err_t PetUi_Init(void)
     lv_label_set_long_mode(s_bubble, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_bubble, "");
     lv_obj_add_flag(s_bubble, LV_OBJ_FLAG_HIDDEN);
+
+    /* 左上角持久状态标签：48×20，始终可见（HAPPY 隐藏）。
+     * 复用同一张位图的状态（GREETING/CELEBRATE/POKE 都用 HAPPY）靠它区分。
+     * 宽 48 容下 2 个中文字（14px×2≈28px，留余量），不与气泡/角色重叠
+     * （角色居中 192×192，标签在 (0,0)~(48,20) 角落，安全）。*/
+    s_state_label_lbl = lv_label_create(s_pet_screen);
+    lv_obj_set_pos(s_state_label_lbl, 0, 0);
+    lv_obj_set_size(s_state_label_lbl, 48, 20);
+    lv_obj_set_style_text_font(s_state_label_lbl, &lv_font_chinese_14, 0);
+    lv_obj_set_style_text_color(s_state_label_lbl, lv_color_black(), 0);
+    lv_obj_set_style_text_align(s_state_label_lbl, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_pad_all(s_state_label_lbl, 0, 0);
+    lv_label_set_text(s_state_label_lbl, "");
+    lv_obj_add_flag(s_state_label_lbl, LV_OBJ_FLAG_HIDDEN);
 
     /* 交互：单击返回 dashboard，长按撸（POKE + 对白 3s）*/
     lv_obj_add_event_cb(s_pet_screen, screen_clicked_cb, LV_EVENT_CLICKED, NULL);

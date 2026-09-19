@@ -11,8 +11,10 @@ extern "C" {
 /* 桌宠表情状态 — 由 data_task 根据设备状态聚合后传入。
  * 优先级（高→低）：SLEEP > LOW_BATT > GREETING > CELEBRATE > REST > FOCUS
  *                                  > ANXIOUS > BUSY > HAPPY。
- * GREETING/CELEBRATE/REST/POKE 本期复用 HAPPY/SLEEP 位图，靠对白区分，
- * 用户后续补齐独立位图后可直接替换 s_pet_bitmap 对应项。*/
+ * GREETING/CELEBRATE/REST/POKE 复用 HAPPY/SLEEP 位图，靠两处区分：
+ *   1) 对白气泡（enter_state 时随机播一句，8s 后隐藏）；
+ *   2) 左上角持久中文状态标签（见 pet_ui.c s_state_label），始终可见，
+ *      让复用同一张位图的状态也能一眼分辨。*/
 typedef enum {
     PET_STATE_HAPPY = 0,    /* TODO 清空 */
     PET_STATE_BUSY,         /* 有未完成 TODO（1-4） */
