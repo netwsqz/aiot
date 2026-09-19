@@ -15,9 +15,6 @@ static const char *TAG = "draw_ui";
 #define DRAW_ROW_BYTES  ((DRAW_W + 7) / 8)   /* 25 字节/行 */
 #define DRAW_BUF_SIZE   (DRAW_W * DRAW_H / 8) /* 5000 字节 */
 
-/* BMP 1bpp 的行 4 字节对齐 padding（25→28），画缩略图时按源行步进用 */
-#define BMP_ROW_PADDED  BMP1BPP_ROW_PADDED
-
 #define DRAW_SPIFFS_PATH  "/spiffs/draw.bmp"
 
 /* ── 静态状态 ── */
@@ -197,8 +194,8 @@ bool DrawUi_RenderThumbnail(uint8_t *dst_buf, int len)
     FILE *f = fopen(DRAW_SPIFFS_PATH, "rb");
     if (!f) return false;
 
-    /* 借 Bmp1Bpp_Read 做校验 + 取像素，顺带把位约定翻过来：
-     * BMP 1=黑 → 我们缓冲 1=白，和 s_draw_buf 一致。 */
+    /* 借 Bmp1Bpp_Read 做校验 + 取像素。这里**不要**取反：下面的多数投票
+     * 是按 BMP 位约定（1=黑）写的，取反会得到负片缩略图。 */
     uint8_t *src = heap_caps_malloc(BMP1BPP_BUF_SIZE, MALLOC_CAP_SPIRAM);
     if (!src || !Bmp1Bpp_Read(f, src)) {
         fclose(f);
@@ -206,7 +203,6 @@ bool DrawUi_RenderThumbnail(uint8_t *dst_buf, int len)
         return false;
     }
     fclose(f);
-    for (int i = 0; i < BMP1BPP_BUF_SIZE; i++) src[i] = (uint8_t)~src[i];
 
     lv_color32_t *px = (lv_color32_t *)dst_buf;
 
@@ -216,7 +212,7 @@ bool DrawUi_RenderThumbnail(uint8_t *dst_buf, int len)
 
         for (int tx = 0; tx < THUMB_W; tx++) {
             int sx0 = tx * 2, sx1 = tx * 2 + 1;
-            /* 数 4 个源像素里黑的个数（缓冲里 1=白，故取反后 1=黑）。*/
+            /* 数 4 个源像素里黑的个数。BMP 1=黑。*/
             int black = 0;
             uint8_t b;
             b = src[sy0 * BMP1BPP_ROW_BYTES + (sx0 >> 3)]; if (b & (0x80 >> (sx0 & 7))) black++;
