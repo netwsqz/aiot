@@ -78,6 +78,15 @@ typedef enum {
     PAGE_DRAW,
 } ui_page_t;
 
+/* Create every sub-page (each init under the LVGL lock) and wire their back
+ * buttons. Call after ui_init(), before ui_switch_page. Idempotent-ish: each
+ * module's Init() early-returns if already built. */
+void ui_init_all(void);
+
+/* The one back action every sub-page wants. Modules receive this via their
+ * SetBackCallback at ui_init_all() time. */
+void ui_back_to_dashboard(void);
+
 void ui_switch_page(ui_page_t page);
 ui_page_t ui_get_current_page(void);
 

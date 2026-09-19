@@ -23,6 +23,10 @@ lv_obj_t *TimerUi_GetScreen(void);
 /* 切换 timer 屏幕内的子页面。须在 LVGL 锁内调用 */
 void TimerUi_ShowPage(timer_page_t page);
 
+/* 当前可见的 timer 子页面。ui_get_current_page() 在 timer 组内靠它取真实
+ * 子页——右滑切子页只走 TimerUi_ShowPage，ui_screen 那份状态会过期。 */
+timer_page_t TimerUi_GetCurrentPage(void);
+
 /* 在 tools 页按返回时调用（→ 回主屏） */
 void TimerUi_SetBackCallback(void (*cb)(void));
 

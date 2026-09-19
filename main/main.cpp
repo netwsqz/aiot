@@ -54,6 +54,17 @@ static volatile bool s_entering_sleep = false;
 /* Last tick when user was on a non-pet page (for idle return-to-pet). */
 static volatile uint32_t s_last_activity_tick = 0;
 
+/* TODO 数据被改过。TodoMgr 的 change 回调在 httpd / LVGL 事件上下文里触发，
+ * 那里绝不能碰 LVGL；所以回调只置这个标志，真正的重绘留在 data_task 里、
+ * 已经持有 LVGL 锁的地方做（和 WeatherFetch_RequestRefresh 同一个套路）。
+ * volatile：写入者可能和读取者不在同一个上下文。 */
+static volatile bool s_todo_dirty = false;
+
+static void todo_changed_cb(void)
+{
+    s_todo_dirty = true;
+}
+
 /* WiFi lazy-init: cold boot sets this true; wakeup path defers until BOOT long-press */
 static bool s_wifi_lazy_inited = false;
 
@@ -131,44 +142,10 @@ static void web_server_reconcile(void)
     }
 }
 
-/* Back callback: TODO lists page → dashboard.
- * ALWAYS invoked from an LVGL event callback (back_btn_cb / swipe_gesture_cb),
- * which already runs inside Lvgl_Lock. Re-acquiring the (non-recursive) mutex
- * here deadlocks and silently drops the navigation — do NOT lock. */
-static void todo_back_cb(void)
-{
-    ui_switch_page(PAGE_DASHBOARD);
-}
-
-/* Timer tools back callback: tools page → dashboard. Runs inside LVGL lock. */
-static void timer_back_cb(void)
-{
-    ui_switch_page(PAGE_DASHBOARD);
-}
-
-/* Weather page back callback: weather page → dashboard. Runs inside LVGL lock. */
-static void weather_back_cb(void)
-{
-    ui_switch_page(PAGE_DASHBOARD);
-}
-
-/* Pet page back callback: pet → dashboard (single click). Runs inside LVGL lock. */
-static void pet_back_cb(void)
-{
-    ui_switch_page(PAGE_DASHBOARD);
-}
-
-/* Draw page back callback: 退出画板前 DrawUi 自行保存笔迹，这里只导航。
- * 运行在 LVGL 锁内（由 DrawUi 的 CLICKED 回调触发）。*/
-static void draw_back_cb(void)
-{
-    ui_switch_page(PAGE_DASHBOARD);
-}
-
-/* Weather page refresh callback: runs inside LVGL lock (button click).
- * Just sets the refresh flag — the actual HTTPS fetch happens in data_task
- * on the next 1s tick, OUTSIDE the LVGL lock (TLS + JSON parse must not
- * hold the UI mutex). */
+/* Weather refresh: wired to the WiFi management page's refresh button by
+ * ui_init_all(). Runs inside LVGL lock (button click). Just sets the refresh
+ * flag — the actual HTTPS fetch happens in data_task on the next 1s tick,
+ * OUTSIDE the LVGL lock (TLS + JSON parse must not hold the UI mutex). */
 static void weather_refresh_cb(void)
 {
     if (WifiBsp_IsConnected()) {
@@ -180,12 +157,6 @@ static void weather_refresh_cb(void)
 }
 
 /* ── WiFi 管理页面回调（均在 LVGL 锁内触发，只做轻量动作） ── */
-
-/* 返回 dashboard（左滑 / 返回按钮）。运行在 LVGL 锁内，不要再 Lock。 */
-static void wifi_back_cb(void)
-{
-    ui_switch_page(PAGE_DASHBOARD);
-}
 
 /* AP 启停按钮：WiFi 管理页里的显式入口（长按 BOOT 不再切 AP，只进界面）。
  * 这里仍在 LVGL 锁内，但 WifiAp_Start/Stop 内部只配 wifi 模式 + 起停定时器，
@@ -215,12 +186,6 @@ static void wifi_reconnect_cb(void)
     } else {
         ESP_LOGW(TAG, "STA reconnect failed (wifi_ui button)");
     }
-}
-
-/* 刷新天气：与天气页原按钮等价（按钮已移除，入口搬到 WiFi 管理页）。 */
-static void wifi_refresh_weather_cb(void)
-{
-    weather_refresh_cb();
 }
 
 /* Timer fired: runs in FreeRTOS timer service task — MUST NOT touch LVGL.
@@ -424,8 +389,9 @@ static void enter_deep_sleep(void)
 static void data_task(void *arg)
 {
     char time_buf[16], date_buf[32];
-    static const char *month_en[] = {"","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
-    static const char *weekday_en[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    /* 中文短格式日期，适配首页左上 100×20 区域（lv_font_chinese_14）。
+     * 周几用"周X"，避免与英文 month_en/weekday_en 覆盖中文显示。 */
+    static const char *weekday_cn[] = {"周日","周一","周二","周三","周四","周五","周六"};
     uint32_t tick = 0;
 
     for (;;) {
@@ -434,10 +400,9 @@ static void data_task(void *arg)
             rtc_datetime_t dt = PortRtc_GetTime();
             snprintf(time_buf, sizeof(time_buf), "%02d:%02d",
                      dt.hour, dt.minute);
-            snprintf(date_buf, sizeof(date_buf), "%s %d %s",
-                     (dt.month >= 1 && dt.month <= 12) ? month_en[dt.month] : "",
-                     dt.day,
-                     (dt.week <= 6) ? weekday_en[dt.week] : "");
+            snprintf(date_buf, sizeof(date_buf), "%d月%d日 %s",
+                     dt.month, dt.day,
+                     (dt.week <= 6) ? weekday_cn[dt.week] : "");
 
             if (Lvgl_Lock(500)) {
                 ui_update_time(time_buf, date_buf);
@@ -466,11 +431,13 @@ static void data_task(void *arg)
             }
         }
 
-        /* TODO UI refresh — every 30 s */
-        if (tick % 30 == 0) {
+        /* TODO UI refresh — 有改动就立刻刷（s_todo_dirty 由 httpd/UI 事件里的
+         * TodoMgr change 回调置位），否则每 30 s 兜底一次。 */
+        if (s_todo_dirty || tick % 30 == 0) {
             if (Lvgl_Lock(500)) {
                 TodoUi_Refresh();
                 ui_update_todo_summary();
+                s_todo_dirty = false;
                 Lvgl_Unlock();
             }
         }
@@ -483,11 +450,14 @@ static void data_task(void *arg)
             }
         }
 
-        /* Idle return to pet page: if user stays on a non-pet page for 60 s,
-         * auto-switch back to the pet (screen-saver behavior). */
+        /* Idle return to pet page: if user stays on a non-pet, non-dashboard
+         * tool page for 60 s, auto-switch back to the pet (screen-saver
+         * behavior). Dashboard is the user's mixed companion summary — it is
+         * NOT auto-left, so they can read todo/pomodoro/sensors at leisure.
+         * Todo/timer/weather/wifi/draw tool pages still time out. */
         {
             ui_page_t cur = ui_get_current_page();
-            if (cur != PAGE_PET) {
+            if (cur != PAGE_PET && cur != PAGE_DASHBOARD) {
                 if (s_last_activity_tick == 0) s_last_activity_tick = tick;
                 if ((tick - s_last_activity_tick) >= 60) {
                     if (Lvgl_Lock(500)) {
@@ -691,76 +661,52 @@ extern "C" void app_main(void)
         PortBattery_Init();
         ESP_LOGI(TAG, "Touch + Battery re-init done");
 
-        /* UI re-init */
+        /* UI: dashboard + every sub-page. One call — see ui_init_all(). */
         if (Lvgl_Lock(-1)) {
             ui_init();
             Lvgl_Unlock();
         }
         ESP_LOGI(TAG, "UI re-init done");
 
-        /* Timer engine + UI */
+        /* Timer engine. MUST init before data_task starts (tick=0 calls
+         * TimerEngine_GetPomodoro, which takes s_mutex). UI comes after. */
         if (TimerEngine_Init() != ESP_OK) {
             ESP_LOGE(TAG, "Timer engine init FAILED");
         }
         TimerEngine_Restore();  /* Recover timers from NVS, adjust for elapsed sleep */
-        if (Lvgl_Lock(-1)) {
-            TimerUi_Init();
-            TimerUi_SetBackCallback(timer_back_cb);
-            Lvgl_Unlock();
-        }
-        TimerEngine_SetFiredCallback(timer_fired_cb);
 
         /* AI engine + UI re-init removed (AI headers not in this checkout). */
 
-        /* TODO Manager + UI */
+        /* TODO Manager (no UI — ui_init_all below covers it) */
         TodoMgr_Init();
-        if (Lvgl_Lock(-1)) {
-            TodoUi_Init();
-            TodoUi_SetBackCallback(todo_back_cb);
-            Lvgl_Unlock();
-        }
+        TodoMgr_SetChangeCallback(todo_changed_cb);
 
         /* Weather: restore cache from NVS (no WiFi on wake path), render it.
          * WiFi stays deferred until BOOT long-press; weather won't refresh
-         * until then — by design, per the spec. */
+         * until then — by design, per the spec.
+         * The cache must be loaded BEFORE ui_init_all(), which builds the
+         * weather page. */
         WeatherCache_Init();
         s_weather_has_cached = WeatherCache_Load(&s_weather_snapshot);
         WeatherFetch_Init();
+
+        /* Every sub-page: one row each in ui_init_all()'s table — init under
+         * the LVGL lock + back callback wired to ui_back_to_dashboard(). */
+        ui_init_all();
+        TimerEngine_SetFiredCallback(timer_fired_cb);
+
+        /* Page-specific wiring that isn't a back button. */
         if (Lvgl_Lock(-1)) {
-            WeatherUI_Init();
-            WeatherUI_SetBackCallback(weather_back_cb);
+            WifiUi_SetToggleApCallback(wifi_toggle_ap_cb);
+            WifiUi_SetReconnectCallback(wifi_reconnect_cb);
+            WifiUi_SetRefreshWeatherCallback(weather_refresh_cb);
             if (s_weather_has_cached) {
                 WeatherUI_Render(&s_weather_snapshot, true);
             }
             Lvgl_Unlock();
         }
-        ESP_LOGI(TAG, "Weather cache re-init: %s",
+        ESP_LOGI(TAG, "Sub-pages init done (weather cache: %s)",
                  s_weather_has_cached ? "loaded" : "empty");
-
-        /* WiFi 管理 UI（AP/STA 状态 + 启停/重连/刷新天气入口） */
-        if (Lvgl_Lock(-1)) {
-            WifiUi_Init();
-            WifiUi_SetBackCallback(wifi_back_cb);
-            WifiUi_SetToggleApCallback(wifi_toggle_ap_cb);
-            WifiUi_SetReconnectCallback(wifi_reconnect_cb);
-            WifiUi_SetRefreshWeatherCallback(wifi_refresh_weather_cb);
-            Lvgl_Unlock();
-        }
-        ESP_LOGI(TAG, "WiFi UI re-init done");
-
-        /* Pet UI (default screen on wake too) */
-        if (Lvgl_Lock(-1)) {
-            PetUi_Init();
-            PetUi_SetBackCallback(pet_back_cb);
-            Lvgl_Unlock();
-        }
-
-        /* Draw UI (画板，右下角入口) — 唤醒路径同样注册 */
-        if (Lvgl_Lock(-1)) {
-            DrawUi_Init();
-            DrawUi_SetBackCallback(draw_back_cb);
-            Lvgl_Unlock();
-        }
 
         /* WiFi AP + Web deferred — lazy-init on BOOT long-press */
 
@@ -866,7 +812,7 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "UI init done");
 
-    /* Timer engine + UI — MUST init before data_task starts. data_task's very
+    /* Timer engine — MUST init before data_task starts. data_task's very
      * first loop (tick=0) calls TimerEngine_GetPomodoro(); if the engine isn't
      * initialized yet s_mutex is NULL and xSemaphoreTake asserts. */
     if (TimerEngine_Init() != ESP_OK) {
@@ -874,74 +820,41 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "Timer engine init done");
 
-    if (Lvgl_Lock(-1)) {
-        TimerUi_Init();
-        TimerUi_SetBackCallback(timer_back_cb);
-        Lvgl_Unlock();
-    }
-    ESP_LOGI(TAG, "Timer UI init done");
-
-    TimerEngine_SetFiredCallback(timer_fired_cb);
-    ESP_LOGI(TAG, "Timer fired callback registered");
-
     /* AI engine + UI init removed (AI headers not in this checkout). */
 
     /* 12. TODO Manager */
     TodoMgr_Init();
+    TodoMgr_SetChangeCallback(todo_changed_cb);
     ESP_LOGI(TAG, "TODO Manager init done");
 
-    /* 12b. Weather: init cache (no WiFi), render cached data under LVGL lock. */
+    /* 12b. Weather cache — must be loaded BEFORE ui_init_all(), which builds
+     * the weather page. Cold boot has no WiFi yet, so only cached data. */
     WeatherCache_Init();
     s_weather_has_cached = WeatherCache_Load(&s_weather_snapshot);
     WeatherFetch_Init();
+    ESP_LOGI(TAG, "Weather cache: %s", s_weather_has_cached ? "loaded" : "empty");
+
+    /* Every sub-page: one row each in ui_init_all()'s table — init under the
+     * LVGL lock + back callback wired to ui_back_to_dashboard(). No WiFi on
+     * this path, so sys params are right. */
+    ui_init_all();
+    TimerEngine_SetFiredCallback(timer_fired_cb);
+    ESP_LOGI(TAG, "Sub-pages init done");
+
+    /* Note: ui_update_todo_summary() lives on data_task's larger stack
+     * (~3.7KB of locals) — calling it from app_main here would overflow
+     * the main task stack and corrupt FreeRTOS internals. */
+
+    /* 12c. Page-specific wiring that isn't a back button. */
     if (Lvgl_Lock(-1)) {
-        WeatherUI_Init();
-        WeatherUI_SetBackCallback(weather_back_cb);
+        WifiUi_SetToggleApCallback(wifi_toggle_ap_cb);
+        WifiUi_SetReconnectCallback(wifi_reconnect_cb);
+        WifiUi_SetRefreshWeatherCallback(weather_refresh_cb);
         if (s_weather_has_cached) {
             WeatherUI_Render(&s_weather_snapshot, true);
         }
         Lvgl_Unlock();
     }
-    ESP_LOGI(TAG, "Weather: cache=%s, UI init done",
-             s_weather_has_cached ? "loaded" : "empty");
-
-    /* 12c. WiFi 管理 UI（AP/STA 状态 + 启停/重连/刷新天气入口） */
-    if (Lvgl_Lock(-1)) {
-        WifiUi_Init();
-        WifiUi_SetBackCallback(wifi_back_cb);
-        WifiUi_SetToggleApCallback(wifi_toggle_ap_cb);
-        WifiUi_SetReconnectCallback(wifi_reconnect_cb);
-        WifiUi_SetRefreshWeatherCallback(wifi_refresh_weather_cb);
-        Lvgl_Unlock();
-    }
-    ESP_LOGI(TAG, "WiFi UI init done");
-
-    /* 13. TODO UI (separate screen, navigated from dashboard) */
-    if (Lvgl_Lock(-1)) {
-        TodoUi_Init();
-        TodoUi_SetBackCallback(todo_back_cb);
-        Lvgl_Unlock();
-    }
-    ESP_LOGI(TAG, "TODO UI init done");
-    /* Note: ui_update_todo_summary() lives on data_task's larger stack
-     * (~3.7KB of locals) — calling it from app_main here would overflow
-     * the main task stack and corrupt FreeRTOS internals. */
-
-    /* 13b. Pet UI (default screen on cold boot) */
-    if (Lvgl_Lock(-1)) {
-        PetUi_Init();
-        PetUi_SetBackCallback(pet_back_cb);
-        Lvgl_Unlock();
-    }
-    ESP_LOGI(TAG, "Pet UI init done");
-
-    /* 13c. Draw UI (画板，右下角入口) */
-    if (Lvgl_Lock(-1)) {
-        DrawUi_Init();
-        DrawUi_SetBackCallback(draw_back_cb);
-        Lvgl_Unlock();
-    }
-    ESP_LOGI(TAG, "Draw UI init done");
 
     /* 14. WiFi AP + Web Server
      * STA WiFi is initialized inline above (step 7). The HTTP server now

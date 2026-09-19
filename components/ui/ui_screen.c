@@ -66,7 +66,7 @@ static void setup_top_left(lv_ui *ui)
     ui->lbl_date = lv_label_create(ui->cont_top_left);
     lv_obj_set_pos(ui->lbl_date, 0, 65);
     lv_obj_set_size(ui->lbl_date, 100, 20);
-    lv_label_set_text(ui->lbl_date, "June 15, Sun");
+    lv_label_set_text(ui->lbl_date, "6月15日 周日");
     lv_obj_set_style_text_font(ui->lbl_date, &lv_font_chinese_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_date, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_align(ui->lbl_date, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
@@ -148,7 +148,7 @@ static void setup_bottom_left(lv_ui *ui)
 
     ui->lbl_todo_title = lv_label_create(ui->cont_bottom_left);
     lv_obj_set_pos(ui->lbl_todo_title, 4, 4);
-    lv_label_set_text(ui->lbl_todo_title, "Todo");
+    lv_label_set_text(ui->lbl_todo_title, "待办");
     lv_obj_set_style_text_font(ui->lbl_todo_title, &lv_font_chinese_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_todo_title, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_decor(ui->lbl_todo_title, LV_TEXT_DECOR_UNDERLINE, LV_PART_MAIN);
@@ -167,10 +167,11 @@ static void setup_bottom_left(lv_ui *ui)
     }
 }
 
-/* ── Bottom-right: Image placeholder ───────────────── */
+/* ── Bottom-right: 画板入口 ───────────────────────── */
 /* 点击右下角 → 进入画板。widget 句柄仍叫 lbl_image_placeholder
- * （保留 ui 结构体字段名，避免改动外层），实际是文字占位；缩略图由独立的
- * img_draw_thumb canvas 承载。pomodoro 运行时二者都隐藏（见 ui_update_timer_mini）。*/
+ * （保留 ui 结构体字段名，避免改动外层），实际是简洁的中文「画」入口提示；
+ * 缩略图由独立的 img_draw_thumb canvas 承载。pomodoro 运行时二者都隐藏
+ * （见 ui_update_timer_mini）。画板为次要功能，入口做弱化处理。*/
 static void draw_entry_click_cb(lv_event_t *e)
 {
     (void)e;
@@ -184,7 +185,7 @@ static void draw_entry_click_cb(lv_event_t *e)
 /* 缩略图 canvas buffer（100×100 ARGB8888 = 40KB，PSRAM）。static 全局唯一。*/
 static lv_color32_t *s_thumb_buf = NULL;
 
-/* 把已保存的画板作品降采样渲染到右下角缩略图 canvas；无作品则显 'Image' 文字。
+/* 把已保存的画板作品降采样渲染到右下角缩略图 canvas；无作品则显「画」文字。
  * 须在 LVGL 锁内调用。pomodoro 运行时缩略图 canvas 隐藏，本函数仍可安全调用。*/
 static void draw_placeholder_refresh(lv_ui *ui)
 {
@@ -195,7 +196,7 @@ static void draw_placeholder_refresh(lv_ui *ui)
         lv_label_set_text(ui->lbl_image_placeholder, "");
     } else {
         lv_obj_add_flag(ui->img_draw_thumb, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(ui->lbl_image_placeholder, "Image");
+        lv_label_set_text(ui->lbl_image_placeholder, "画");
     }
 }
 
@@ -208,7 +209,7 @@ static void setup_bottom_right(lv_ui *ui)
     lv_obj_add_event_cb(ui->cont_bottom_right, draw_entry_click_cb, LV_EVENT_CLICKED, NULL);
 
     /* 缩略图 canvas（100×100，铺满象限）。懒分配 PSRAM。
-     * 无作品时 hidden，显示下方 'Image' 文字。*/
+     * 无作品时 hidden，显示下方画板入口文字「画」。*/
     s_thumb_buf = (lv_color32_t *)heap_caps_malloc(
         UI_THUMB_W * UI_THUMB_H * sizeof(lv_color32_t), MALLOC_CAP_SPIRAM);
     ui->img_draw_thumb = lv_canvas_create(ui->cont_bottom_right);
@@ -222,8 +223,8 @@ static void setup_bottom_right(lv_ui *ui)
     ui->lbl_image_placeholder = lv_label_create(ui->cont_bottom_right);
     lv_obj_set_pos(ui->lbl_image_placeholder, 0, 40);
     lv_obj_set_size(ui->lbl_image_placeholder, 100, 24);
-    lv_label_set_text(ui->lbl_image_placeholder, "Image");
-    lv_obj_set_style_text_font(ui->lbl_image_placeholder, &lv_font_montserrat_20, LV_PART_MAIN);
+    lv_label_set_text(ui->lbl_image_placeholder, "画");
+    lv_obj_set_style_text_font(ui->lbl_image_placeholder, &lv_font_chinese_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ui->lbl_image_placeholder, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_align(ui->lbl_image_placeholder, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
@@ -330,10 +331,15 @@ void ui_update_battery(uint8_t level)
 
 void ui_update_wifi_status(bool connected)
 {
-    if (connected)
+    if (connected) {
+        /* WIFI 是 FontAwesome 符号，需 Montserrat14（中文字体无符号字形） */
+        lv_obj_set_style_text_font(ui.lbl_wifi, &lv_font_montserrat_14, LV_PART_MAIN);
         lv_label_set_text(ui.lbl_wifi, LV_SYMBOL_WIFI);
-    else
-        lv_label_set_text(ui.lbl_wifi, "");
+    } else {
+        /* 短中文提示，需中文字体（Montserrat14 无 CJK 字形） */
+        lv_obj_set_style_text_font(ui.lbl_wifi, &lv_font_chinese_14, LV_PART_MAIN);
+        lv_label_set_text(ui.lbl_wifi, "未连接");
+    }
 }
 
 /* ── Dashboard right-bottom pomodoro mini display ── */
@@ -447,41 +453,105 @@ static void weather_entry_click_cb(lv_event_t *e)
 }
 
 /* ── Page management ── */
+
+/* The one back action every sub-page wants. Modules get this injected as
+ * their back callback by ui_init_all(), so main.cpp declares no per-page
+ * back callbacks at all. */
+void ui_back_to_dashboard(void)
+{
+    ui_switch_page(PAGE_DASHBOARD);
+}
+
+void ui_init_all(void)
+{
+    /* One row per sub-page that owns a screen. Adding a page = adding a row.
+     * Order matters: ui_init() must run first (it creates the dashboard this
+     * table's screens are siblings of). TimerEngine_Init/Restore stay in
+     * main.cpp — they're engine lifecycle, not UI.
+     * Screens are lazily fetched by ui_switch_page's own GetScreen calls, so
+     * only init + back-callback live here. */
+    typedef struct {
+        void (*init)(void);
+        void (*set_back)(void (*)(void));
+    } page_reg_t;
+
+    static const page_reg_t reg[] = {
+        { (void (*)(void))TimerUi_Init, TimerUi_SetBackCallback },
+        { WeatherUI_Init,               WeatherUI_SetBackCallback },
+        { WifiUi_Init,                  WifiUi_SetBackCallback },
+        { (void (*)(void))TodoUi_Init,  TodoUi_SetBackCallback },
+        { (void (*)(void))PetUi_Init,   PetUi_SetBackCallback },
+        { (void (*)(void))DrawUi_Init,  DrawUi_SetBackCallback },
+    };
+
+    for (size_t i = 0; i < sizeof reg / sizeof reg[0]; i++) {
+        if (!Lvgl_Lock(-1)) continue;   /* ponytail: skip rather than race; -1 never fails today */
+        reg[i].init();
+        reg[i].set_back(ui_back_to_dashboard);
+        Lvgl_Unlock();
+    }
+}
+
 void ui_switch_page(ui_page_t page)
 {
     s_current_page = page;
-    if (page == PAGE_DASHBOARD) {
+
+    /* Lazy screen creation — each page's GetScreen() builds on first call. */
+    lv_obj_t **slot = NULL;
+    switch (page) {
+        case PAGE_TODO_LISTS:
+        case PAGE_TODO_TASKS: slot = &s_todo_screen;    break;
+        case PAGE_TIMER_TOOLS:
+        case PAGE_POMODORO:
+        case PAGE_REMINDER:   slot = &s_timer_screen;   break;
+        case PAGE_WEATHER:    slot = &s_weather_screen; break;
+        case PAGE_WIFI_MGMT:  slot = &s_wifi_screen;    break;
+        case PAGE_PET:        slot = &s_pet_screen;     break;
+        case PAGE_DRAW:       slot = &s_draw_screen;    break;
+        default: break;
+    }
+    if (slot && !*slot) {
+        switch (page) {
+            case PAGE_TODO_LISTS:
+            case PAGE_TODO_TASKS: *slot = TodoUi_GetScreen();    break;
+            case PAGE_TIMER_TOOLS:
+            case PAGE_POMODORO:
+            case PAGE_REMINDER:   *slot = TimerUi_GetScreen();   break;
+            case PAGE_WEATHER:    *slot = WeatherUI_GetScreen(); break;
+            case PAGE_WIFI_MGMT:  *slot = WifiUi_GetScreen();    break;
+            case PAGE_PET:        *slot = PetUi_GetScreen();     break;
+            case PAGE_DRAW:       *slot = DrawUi_GetScreen();    break;
+            default: break;
+        }
+    }
+
+    switch (page) {
+    case PAGE_DASHBOARD:
         /* 返回 dashboard 时刷新右下角占位：画板可能刚存了新作品 */
         draw_placeholder_refresh(&ui);
         lv_screen_load(s_dashboard_screen);
-    } else if (page == PAGE_TODO_LISTS) {
-        if (!s_todo_screen) {
-            s_todo_screen = TodoUi_GetScreen();
-        }
+        break;
+    case PAGE_TODO_LISTS:
         if (s_todo_screen) {
             TodoUi_ShowPage(TODO_PAGE_LISTS, NULL);
             lv_screen_load(s_todo_screen);
         }
-    } else if (page == PAGE_TODO_TASKS) {
-        if (!s_todo_screen) {
-            s_todo_screen = TodoUi_GetScreen();
-        }
-        if (s_todo_screen) {
-            lv_screen_load(s_todo_screen);
-        }
-    } else if (page == PAGE_TIMER_TOOLS || page == PAGE_POMODORO || page == PAGE_REMINDER) {
-        if (!s_timer_screen) s_timer_screen = TimerUi_GetScreen();
+        break;
+    case PAGE_TODO_TASKS:
+        if (s_todo_screen) lv_screen_load(s_todo_screen);
+        break;
+    case PAGE_TIMER_TOOLS:
+    case PAGE_POMODORO:
+    case PAGE_REMINDER:
         if (s_timer_screen) {
             timer_page_t tp = (page == PAGE_POMODORO) ? TIMER_PAGE_POMODORO :
                               (page == PAGE_REMINDER)  ? TIMER_PAGE_REMINDER :
-                                                        TIMER_PAGE_TOOLS;
+                                                         TIMER_PAGE_TOOLS;
             TimerUi_ShowPage(tp);
             lv_screen_load(s_timer_screen);
         }
-    } else if (page == PAGE_WEATHER) {
-        if (!s_weather_screen) {
-            s_weather_screen = WeatherUI_GetScreen();
-        }
+        break;
+    case PAGE_WEATHER:
         if (s_weather_screen) {
             lv_screen_load(s_weather_screen);
             /* Render the current snapshot immediately on entry. data_task
@@ -490,33 +560,38 @@ void ui_switch_page(ui_page_t page)
              * a blank screen full of empty labels until the next fetch. */
             WeatherUI_RenderIfCached();
         }
-    } else if (page == PAGE_WIFI_MGMT) {
-        if (!s_wifi_screen) {
-            s_wifi_screen = WifiUi_GetScreen();
-        }
-        if (s_wifi_screen) {
-            lv_screen_load(s_wifi_screen);
-        }
-    } else if (page == PAGE_PET) {
-        if (!s_pet_screen) {
-            s_pet_screen = PetUi_GetScreen();
-        }
-        if (s_pet_screen) {
-            lv_screen_load(s_pet_screen);
-        }
-    } else if (page == PAGE_DRAW) {
-        if (!s_draw_screen) {
-            s_draw_screen = DrawUi_GetScreen();
-        }
+        break;
+    case PAGE_WIFI_MGMT:
+        if (s_wifi_screen) lv_screen_load(s_wifi_screen);
+        break;
+    case PAGE_PET:
+        if (s_pet_screen) lv_screen_load(s_pet_screen);
+        break;
+    case PAGE_DRAW:
         if (s_draw_screen) {
             DrawUi_Enter();   /* 每次进入即清空为空白 */
             DrawUi_SetIndevFast(lv_indev_get_next(NULL));  /* 8ms 采样，避免曲线变折线 */
             lv_screen_load(s_draw_screen);
         }
+        break;
     }
 }
 
 ui_page_t ui_get_current_page(void)
 {
+    /* Timer sub-pages can change without ui_switch_page: the right-swipe
+     * handler in timer_ui calls TimerUi_ShowPage() directly. s_current_page
+     * still reads PAGE_POMODORO/PAGE_REMINDER after such a swipe, which the
+     * 60 s idle timer in data_task would then honour — bouncing the user off
+     * a page they just navigated to. Ask timer_ui for the real sub-page. */
+    if (s_current_page == PAGE_TIMER_TOOLS ||
+        s_current_page == PAGE_POMODORO    ||
+        s_current_page == PAGE_REMINDER) {
+        switch (TimerUi_GetCurrentPage()) {
+            case TIMER_PAGE_POMODORO: return PAGE_POMODORO;
+            case TIMER_PAGE_REMINDER: return PAGE_REMINDER;
+            default:                  return PAGE_TIMER_TOOLS;
+        }
+    }
     return s_current_page;
 }
