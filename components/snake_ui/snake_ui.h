@@ -17,7 +17,7 @@ extern "C" {
  *
  * 节奏：lv_timer 500ms/步（data_task 不驱动，独立 timer）。
  * 操控：点击屏幕四象限转向（上/下/左/右），禁 180° 反向。
- * 入口：dashboard 右下角长按（短按仍画板）。
+ * 入口：dashboard 右下角短按 → 应用列表页 → 左上格。
  *
  * 须在 LVGL 锁内调用所有公开 API。*/
 
@@ -35,7 +35,7 @@ void SnakeUi_Enter(void);
  * 须在 LVGL 锁内调用。由 ui_switch_page 或 BOOT 短按退出路径触发。 */
 void SnakeUi_Exit(void);
 
-/* 退出前的回调（由 main.cpp 注入，设为 ui_switch_page(PAGE_DASHBOARD)）。
+/* 退出前的回调（由 ui_init_all() 注入，设为 ui_back_to_dashboard）。
  * 运行在 LVGL 锁内。SnakeUi 在回调触发前已 SnakeUi_Exit 停 timer。 */
 void SnakeUi_SetBackCallback(void (*cb)(void));
 

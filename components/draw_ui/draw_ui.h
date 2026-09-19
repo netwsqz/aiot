@@ -31,7 +31,7 @@ void DrawUi_SaveAndExit(void);
 void DrawUi_SetIndevFast(lv_indev_t *indev);
 void DrawUi_RestoreIndevPeriod(void);
 
-/* 退出画板前的回调（由 main.cpp 注入，设为 ui_switch_page(PAGE_DASHBOARD)）。
+/* 退出画板前的回调（由 ui_init_all() 注入，设为 ui_back_to_dashboard）。
  * 运行在 LVGL 锁内。DrawUi 在回调触发前先把当前笔迹保存到 SPIFFS。*/
 void DrawUi_SetBackCallback(void (*cb)(void));
 

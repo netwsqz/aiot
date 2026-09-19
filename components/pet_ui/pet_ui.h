@@ -44,7 +44,7 @@ void PetUi_SetState(pet_state_t s);
  * 须在 LVGL 锁内调用 */
 void PetUi_Refresh(void);
 
-/* 单击桌宠 → 跳 dashboard（由 main.cpp 设置）。运行在 LVGL 锁内 */
+/* 单击桌宠 → 跳 dashboard（由 ui_init_all() 设置）。运行在 LVGL 锁内 */
 void PetUi_SetBackCallback(void (*cb)(void));
 
 #ifdef __cplusplus

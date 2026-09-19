@@ -162,7 +162,7 @@ void draw_ui_save_current(void)
 }
 
 /* 保存当前笔迹并退出回 dashboard。由 BOOT 键单击路径调用（替代长按退出）。
- * 保存由 DrawUi 自己做，导航靠 s_back_cb（main.cpp 注入的 ui_switch_page(DASHBOARD)）。*/
+ * 保存由 DrawUi 自己做，导航靠 s_back_cb（ui_init_all() 注入的 ui_back_to_dashboard）。*/
 void DrawUi_SaveAndExit(void)
 {
     draw_ui_save_current();
